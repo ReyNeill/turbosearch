@@ -16,6 +16,8 @@ export type AppConfig = {
   ollamaBaseUrl: string;
   ollamaGlmOcrModel: string;
   ocrPrompt: string;
+  ocrContextTokens: number;
+  ocrMaxOutputTokens: number;
 };
 
 export function loadEnvLocal(cwd = process.cwd()): void {
@@ -53,6 +55,8 @@ export function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434",
     ollamaGlmOcrModel: process.env.OLLAMA_GLM_OCR_MODEL ?? "glm-ocr:latest",
     ocrPrompt: process.env.TURBOSEARCH_OCR_PROMPT ?? "Text Recognition:",
+    ocrContextTokens: Number(process.env.TURBOSEARCH_OCR_CONTEXT_TOKENS ?? 8192),
+    ocrMaxOutputTokens: Number(process.env.TURBOSEARCH_OCR_MAX_OUTPUT_TOKENS ?? 2048),
     ...overrides
   };
 }

@@ -29,6 +29,8 @@ export function createOcrProvider(config: AppConfig): OcrProvider | null {
   return new OllamaGlmOcrProvider({
     baseUrl: config.ollamaBaseUrl,
     model: config.ollamaGlmOcrModel,
-    defaultPrompt: config.ocrPrompt
+    defaultPrompt: config.ocrPrompt,
+    contextTokens: config.ocrContextTokens,
+    maxOutputTokens: config.ocrMaxOutputTokens
   });
 }

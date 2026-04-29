@@ -100,6 +100,8 @@ function configFromArgs(args: ParsedArgs, payload: JsonPayload): AppConfig {
     ollamaBaseUrl: getString(payload, "ollamaBaseUrl") ?? String(args.flags["ollama-base-url"] ?? process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434"),
     ollamaGlmOcrModel: getString(payload, "ollamaGlmOcrModel") ?? String(args.flags["ollama-glm-ocr-model"] ?? process.env.OLLAMA_GLM_OCR_MODEL ?? "glm-ocr:latest"),
     ocrPrompt: getString(payload, "ocrPrompt") ?? String(args.flags["ocr-prompt"] ?? process.env.TURBOSEARCH_OCR_PROMPT ?? "Text Recognition:"),
+    ocrContextTokens: getNumber(payload, "ocrContextTokens") ?? Number(args.flags["ocr-context-tokens"] ?? process.env.TURBOSEARCH_OCR_CONTEXT_TOKENS ?? 8192),
+    ocrMaxOutputTokens: getNumber(payload, "ocrMaxOutputTokens") ?? Number(args.flags["ocr-max-output-tokens"] ?? process.env.TURBOSEARCH_OCR_MAX_OUTPUT_TOKENS ?? 2048),
     turboBits: getNumber(payload, "turboBits") ?? Number(args.flags["turbo-bits"] ?? process.env.TURBOSEARCH_TURBO_BITS ?? 4),
     turboRerankLimit: getNumber(payload, "turboRerank") ?? Number(args.flags["turbo-rerank"] ?? process.env.TURBOSEARCH_TURBO_RERANK_LIMIT ?? 80)
   });

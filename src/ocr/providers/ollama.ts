@@ -5,6 +5,8 @@ type OllamaGlmOcrOptions = {
   baseUrl: string;
   model: string;
   defaultPrompt: string;
+  contextTokens: number;
+  maxOutputTokens: number;
 };
 
 type OllamaGenerateResponse = {
@@ -17,11 +19,15 @@ export class OllamaGlmOcrProvider implements OcrProvider {
   private readonly baseUrl: string;
   private readonly model: string;
   private readonly defaultPrompt: string;
+  private readonly contextTokens: number;
+  private readonly maxOutputTokens: number;
 
   constructor(options: OllamaGlmOcrOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
     this.model = options.model;
     this.defaultPrompt = options.defaultPrompt;
+    this.contextTokens = options.contextTokens;
+    this.maxOutputTokens = options.maxOutputTokens;
   }
 
   async extractText(request: OcrRequest): Promise<OcrResponse> {
@@ -35,7 +41,9 @@ export class OllamaGlmOcrProvider implements OcrProvider {
         images: [image.toString("base64")],
         stream: false,
         options: {
-          temperature: 0
+          temperature: 0,
+          num_ctx: this.contextTokens,
+          num_predict: this.maxOutputTokens
         }
       })
     });

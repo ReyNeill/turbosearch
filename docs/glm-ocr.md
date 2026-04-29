@@ -42,6 +42,8 @@ TURBOSEARCH_OCR_PROVIDER=ollama-glm-ocr
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_GLM_OCR_MODEL=glm-ocr:latest
 TURBOSEARCH_OCR_PROMPT=Text Recognition:
+TURBOSEARCH_OCR_CONTEXT_TOKENS=8192
+TURBOSEARCH_OCR_MAX_OUTPUT_TOKENS=2048
 ```
 
 The Bun adapter sends:
@@ -59,7 +61,11 @@ Request:
   "prompt": "Text Recognition:",
   "images": ["base64-image"],
   "stream": false,
-  "options": { "temperature": 0 }
+  "options": {
+    "temperature": 0,
+    "num_ctx": 8192,
+    "num_predict": 2048
+  }
 }
 ```
 
