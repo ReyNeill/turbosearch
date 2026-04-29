@@ -1,0 +1,21 @@
+{
+  "name": "turbosearch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "turbosearch": "./src/cli.ts"
+  },
+  "scripts": {
+    "ingest": "bun run src/cli.ts ingest",
+    "search": "bun run src/cli.ts search",
+    "stats": "bun run src/cli.ts stats",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check": "bun run typecheck && bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.20",
+    "typescript": "^5.9.2"
+  }
+}
