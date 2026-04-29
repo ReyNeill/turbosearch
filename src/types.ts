@@ -1,5 +1,6 @@
 export type EmbeddingProviderName = "hash" | "openai";
 export type SearchBackendName = "exact" | "turbo";
+export type OcrProviderName = "none" | "ollama-glm-ocr" | "vllm-glm-ocr";
 
 export type SourceKind = "text" | "pdf" | "image" | "video" | "binary";
 
@@ -30,7 +31,7 @@ export type ExtractionPending = {
   sourceKind: SourceKind;
   pending: true;
   reason: string;
-  requiredExtractor: "local-ocr-model" | "local-transcription-model";
+  requiredExtractor: OcrProviderName | "local-transcription-model";
 };
 
 export type ExtractionResult = {

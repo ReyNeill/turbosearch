@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EmbeddingProviderName, SearchBackendName } from "./types.ts";
+import type { EmbeddingProviderName, OcrProviderName, SearchBackendName } from "./types.ts";
 
 export type AppConfig = {
   dbPath: string;
@@ -12,6 +12,10 @@ export type AppConfig = {
   turboBits: number;
   turboRerankLimit: number;
   defaultBackend: SearchBackendName;
+  ocrProvider: OcrProviderName;
+  ollamaBaseUrl: string;
+  ollamaGlmOcrModel: string;
+  ocrPrompt: string;
 };
 
 export function loadEnvLocal(cwd = process.cwd()): void {
@@ -45,6 +49,10 @@ export function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     turboBits: Number(process.env.TURBOSEARCH_TURBO_BITS ?? 4),
     turboRerankLimit: Number(process.env.TURBOSEARCH_TURBO_RERANK_LIMIT ?? 80),
     defaultBackend: "exact",
+    ocrProvider: parseOcrProvider(process.env.TURBOSEARCH_OCR_PROVIDER),
+    ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434",
+    ollamaGlmOcrModel: process.env.OLLAMA_GLM_OCR_MODEL ?? "glm-ocr:latest",
+    ocrPrompt: process.env.TURBOSEARCH_OCR_PROMPT ?? "Text Recognition:",
     ...overrides
   };
 }
@@ -52,4 +60,10 @@ export function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 function parseEmbeddingProvider(value: string | undefined): EmbeddingProviderName {
   if (value === "openai") return "openai";
   return "hash";
+}
+
+function parseOcrProvider(value: string | undefined): OcrProviderName {
+  if (value === "none") return "none";
+  if (value === "vllm-glm-ocr") return "vllm-glm-ocr";
+  return "ollama-glm-ocr";
 }

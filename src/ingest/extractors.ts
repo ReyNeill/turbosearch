@@ -6,6 +6,7 @@ import type {
   ExtractionPending,
   ExtractionResult
 } from "../types.ts";
+import type { OcrProvider } from "../ocr/provider.ts";
 import { extensionOf } from "../utils/files.ts";
 
 const textExtensions = new Set([
@@ -41,8 +42,8 @@ const textExtensions = new Set([
 const imageExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".tiff", ".bmp"]);
 const videoExtensions = new Set([".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"]);
 
-export async function extractDocument(path: string): Promise<ExtractedDocument | null> {
-  const result = await extractEvidence(path);
+export async function extractDocument(path: string, ocrProvider?: OcrProvider | null): Promise<ExtractedDocument | null> {
+  const result = await extractEvidence(path, ocrProvider);
   if (result.skipped || result.evidence.length === 0) return null;
 
   return {
@@ -61,7 +62,7 @@ export async function extractDocument(path: string): Promise<ExtractedDocument |
   };
 }
 
-export async function extractEvidence(path: string): Promise<ExtractionResult> {
+export async function extractEvidence(path: string, ocrProvider?: OcrProvider | null): Promise<ExtractionResult> {
   const fileStat = await stat(path);
   if (!fileStat.isFile()) {
     throw new Error(`Extraction path is not a file: ${path}`);
@@ -97,7 +98,7 @@ export async function extractEvidence(path: string): Promise<ExtractionResult> {
   }
 
   if (imageExtensions.has(extension) || videoExtensions.has(extension)) {
-    return extractMediaEvidence(path, imageExtensions.has(extension) ? "image" : "video");
+    return extractMediaEvidence(path, imageExtensions.has(extension) ? "image" : "video", ocrProvider ?? null);
   }
 
   return { path, kind: "binary", evidence: [], pending: [], skipped: true };
@@ -153,18 +154,46 @@ async function getPdfPageCount(path: string): Promise<number | null> {
   return match ? Number(match[1]) : null;
 }
 
-async function extractMediaEvidence(path: string, kind: "image" | "video"): Promise<ExtractionResult> {
+async function extractMediaEvidence(path: string, kind: "image" | "video", ocrProvider: OcrProvider | null): Promise<ExtractionResult> {
   const sidecar = await readFirstExisting(kind === "image"
     ? [`${path}.ocr.txt`, `${path}.txt`, `${path}.md`]
     : [`${path}.transcript.txt`, `${path}.ocr.txt`, `${path}.txt`, `${path}.md`]);
 
-  const pending = createPendingExtraction(path, kind);
+  const pending: ExtractionPending[] = [];
+  if (kind === "image" && ocrProvider) {
+    try {
+      const ocr = await ocrProvider.extractText({ imagePath: path });
+      return {
+        path,
+        kind,
+        evidence: [{
+          sourcePath: path,
+          sourceKind: kind,
+          modality: "image_ocr",
+          text: ocr.text,
+          locator: {},
+          metadata: {
+            extension: extensionOf(path),
+            extractor: ocr.provider,
+            model: ocr.model
+          }
+        }],
+        pending,
+        skipped: false
+      };
+    } catch (error) {
+      pending.push(createPendingExtraction(path, kind, error));
+    }
+  } else if (kind === "video") {
+    pending.push(createPendingExtraction(path, kind));
+  }
+
   if (!sidecar) {
     return {
       path,
       kind,
       evidence: [],
-      pending: [pending],
+      pending,
       skipped: false
     };
   }
@@ -181,22 +210,23 @@ async function extractMediaEvidence(path: string, kind: "image" | "video"): Prom
       metadata: {
         extension: extensionOf(path),
         extractor: "sidecar",
-        localModelExtractor: "pending"
+        localModelExtractor: kind === "image" ? "glm-ocr-fallback" : "pending"
       }
     }],
-    pending: [pending],
+    pending,
     skipped: false
   };
 }
 
-function createPendingExtraction(path: string, kind: "image" | "video"): ExtractionPending {
+function createPendingExtraction(path: string, kind: "image" | "video", error?: unknown): ExtractionPending {
   if (kind === "image") {
+    const detail = error instanceof Error ? ` ${error.message}` : "";
     return {
       sourcePath: path,
       sourceKind: kind,
       pending: true,
-      reason: "Image OCR local model is not configured yet.",
-      requiredExtractor: "local-ocr-model"
+      reason: `GLM-OCR evidence is pending.${detail}`,
+      requiredExtractor: "ollama-glm-ocr"
     };
   }
 

@@ -2,6 +2,7 @@ import type { AppConfig } from "../config.ts";
 import { chunkDocument } from "../chunking/chunker.ts";
 import type { EmbeddingProvider } from "../embeddings/provider.ts";
 import { extractEvidence } from "../ingest/extractors.ts";
+import { createOcrProvider, type OcrProvider } from "../ocr/provider.ts";
 import { SearchDatabase } from "../storage/database.ts";
 import type {
   ExtractedDocument,
@@ -20,6 +21,7 @@ import { TurboQuantCodec } from "../vector/turboquant/index.ts";
 export class SearchEngine {
   private readonly database: SearchDatabase;
   private readonly turbo: TurboQuantCodec;
+  private readonly ocrProvider: OcrProvider | null;
 
   constructor(
     private readonly config: AppConfig,
@@ -30,6 +32,7 @@ export class SearchEngine {
       dimension: embeddings.dimensions,
       bits: config.turboBits
     });
+    this.ocrProvider = createOcrProvider(config);
   }
 
   close(): void {
@@ -42,7 +45,7 @@ export class SearchEngine {
 
     for (const file of files) {
       onEvent?.({ type: "document_started", path: file });
-      const extraction = await extractEvidence(file);
+      const extraction = await extractEvidence(file, this.ocrProvider);
       summary.pendingExtractions += extraction.pending.length;
       for (const pending of extraction.pending) {
         onEvent?.({

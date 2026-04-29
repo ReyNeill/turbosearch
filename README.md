@@ -57,10 +57,13 @@ Images and videos are currently indexed only when real text evidence exists as s
 
 When sidecars are missing, extraction reports a pending local-model integration instead of indexing filenames as fake semantic evidence.
 
-Pending local model hooks:
+Selected/pending local model hooks:
 
-- images: local OCR model
+- images: Z.ai GLM-OCR through Ollama for local development
 - video/audio: local transcription model
-- video frames: local OCR model after frame sampling
+- video frames: Z.ai GLM-OCR through Ollama after frame sampling
+- production OCR target: vLLM GLM-OCR provider
+
+GLM-OCR notes live in [docs/glm-ocr.md](docs/glm-ocr.md). Ollama is wired for local image OCR; vLLM is the production target and still needs the exact service contract.
 
 TurboQuant belongs in the vector backend, not in ingestion. The retrieval quality will mostly come from chunking, multimodal extraction, metadata filters, and reranking.

@@ -2,6 +2,7 @@
 import { createConfig, loadEnvLocal, type AppConfig } from "./config.ts";
 import { createEmbeddingProvider } from "./embeddings/provider.ts";
 import { extractEvidence } from "./ingest/extractors.ts";
+import { createOcrProvider } from "./ocr/provider.ts";
 import { SearchEngine } from "./search/search-engine.ts";
 import type { EmbeddingProviderName, SearchBackendName } from "./types.ts";
 
@@ -40,7 +41,7 @@ async function main(): Promise<void> {
     }
 
     if (command === "extract") {
-      await runExtract(args, payload);
+      await runExtract(args, payload, config);
       return;
     }
 
@@ -78,13 +79,14 @@ async function runSearch(engine: SearchEngine, args: ParsedArgs, payload: JsonPa
   writeJson({ ok: true, command: "search", query, backend, k, results });
 }
 
-async function runExtract(args: ParsedArgs, payload: JsonPayload): Promise<void> {
+async function runExtract(args: ParsedArgs, payload: JsonPayload, config: AppConfig): Promise<void> {
   const paths = getStringArray(payload, "paths") ?? maybeSinglePath(args, payload);
   if (paths.length === 0) throw new Error("extract requires a path or paths.");
 
+  const ocrProvider = createOcrProvider(config);
   const results = [];
   for (const path of paths) {
-    results.push(await extractEvidence(path));
+    results.push(await extractEvidence(path, ocrProvider));
   }
 
   writeJson({ ok: true, command: "extract", results });
@@ -94,9 +96,20 @@ function configFromArgs(args: ParsedArgs, payload: JsonPayload): AppConfig {
   return createConfig({
     dbPath: getString(payload, "db") ?? String(args.flags.db ?? ".turbosearch/index.sqlite"),
     embeddingProvider: parseEmbeddingProvider(getValue(args.flags.embedding, payload.embedding)),
+    ocrProvider: parseOcrProvider(getValue(args.flags.ocr, payload.ocrProvider)),
+    ollamaBaseUrl: getString(payload, "ollamaBaseUrl") ?? String(args.flags["ollama-base-url"] ?? process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434"),
+    ollamaGlmOcrModel: getString(payload, "ollamaGlmOcrModel") ?? String(args.flags["ollama-glm-ocr-model"] ?? process.env.OLLAMA_GLM_OCR_MODEL ?? "glm-ocr:latest"),
+    ocrPrompt: getString(payload, "ocrPrompt") ?? String(args.flags["ocr-prompt"] ?? process.env.TURBOSEARCH_OCR_PROMPT ?? "Text Recognition:"),
     turboBits: getNumber(payload, "turboBits") ?? Number(args.flags["turbo-bits"] ?? process.env.TURBOSEARCH_TURBO_BITS ?? 4),
     turboRerankLimit: getNumber(payload, "turboRerank") ?? Number(args.flags["turbo-rerank"] ?? process.env.TURBOSEARCH_TURBO_RERANK_LIMIT ?? 80)
   });
+}
+
+function parseOcrProvider(value: string | boolean | undefined): AppConfig["ocrProvider"] {
+  if (value === "none") return "none";
+  if (value === "vllm-glm-ocr") return "vllm-glm-ocr";
+  if (value === "ollama-glm-ocr" || value === undefined || value === false) return "ollama-glm-ocr";
+  throw new Error(`Unsupported OCR provider: ${String(value)}`);
 }
 
 function parseEmbeddingProvider(value: string | boolean | undefined): EmbeddingProviderName {
@@ -167,6 +180,9 @@ JSON mode:
 Options:
   --embedding      hash by default; openai requires OPENAI_API_KEY in .env.local
   --backend        exact or turbo
+  --ocr            ollama-glm-ocr by default; use none to skip OCR or vllm-glm-ocr for prod placeholder
+  --ollama-base-url
+                   Ollama base URL, default http://127.0.0.1:11434
   --json           read a JSON request from the next argument, or stdin when no value is provided
   --jsonl          stream ingestion events as JSON Lines
   --turbo-bits     compressed backend bit width, default 4
