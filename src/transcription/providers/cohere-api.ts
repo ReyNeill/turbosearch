@@ -3,6 +3,7 @@ import type {
   TranscriptionRequest,
   TranscriptionResponse
 } from "../provider.ts";
+import { parseTranscriptionSegments } from "../segments.ts";
 
 type CohereTranscriptionOptions = {
   apiKey: string;
@@ -14,6 +15,7 @@ type CohereTranscriptionOptions = {
 type CohereTranscriptionResponse = {
   text?: string;
   language?: string;
+  segments?: unknown;
 };
 
 export class CohereApiTranscriptionProvider implements TranscriptionProvider {
@@ -60,7 +62,8 @@ export class CohereApiTranscriptionProvider implements TranscriptionProvider {
       text,
       model: this.model,
       provider: this.name,
-      language: json.language ?? request.language ?? this.language
+      language: json.language ?? request.language ?? this.language,
+      segments: parseTranscriptionSegments(json.segments)
     };
   }
 }

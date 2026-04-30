@@ -3,6 +3,7 @@ import type {
   TranscriptionRequest,
   TranscriptionResponse
 } from "../provider.ts";
+import { parseTranscriptionSegments } from "../segments.ts";
 
 type VllmTranscriptionOptions = {
   endpoint: string;
@@ -13,6 +14,7 @@ type VllmTranscriptionOptions = {
 type VllmTranscriptionResponse = {
   text?: string;
   language?: string;
+  segments?: unknown;
 };
 
 export class VllmCohereTranscriptionProvider implements TranscriptionProvider {
@@ -50,7 +52,8 @@ export class VllmCohereTranscriptionProvider implements TranscriptionProvider {
       text,
       model: this.model,
       provider: this.name,
-      language: json.language ?? request.language ?? this.language
+      language: json.language ?? request.language ?? this.language,
+      segments: parseTranscriptionSegments(json.segments)
     };
   }
 }

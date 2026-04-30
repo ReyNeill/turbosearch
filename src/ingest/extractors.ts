@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { basename, join } from "node:path";
 import { LiteParse, type ParseResult, type ParsedPage } from "@llamaindex/liteparse";
@@ -10,8 +10,9 @@ import type {
   PdfParserName
 } from "../types.ts";
 import type { OcrProvider } from "../ocr/provider.ts";
-import type { TranscriptionProvider } from "../transcription/provider.ts";
+import type { TranscriptionProvider, TranscriptionResponse } from "../transcription/provider.ts";
 import { extensionOf } from "../utils/files.ts";
+import { sha256Text } from "../utils/hash.ts";
 
 const textExtensions = new Set([
   ".txt",
@@ -47,13 +48,29 @@ const imageExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".tif
 const audioExtensions = new Set([".wav", ".mp3", ".mpeg", ".mpga", ".m4a", ".ogg", ".flac"]);
 const videoExtensions = new Set([".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"]);
 
+export type ExtractionOptions = {
+  pdfParser: PdfParserName;
+  pdfOcrMaxPages: number;
+  videoFrameOcr: boolean;
+  videoFrameOcrIntervalSeconds: number;
+  videoFrameOcrMaxFrames: number;
+};
+
+const defaultExtractionOptions: ExtractionOptions = {
+  pdfParser: "liteparse",
+  pdfOcrMaxPages: 200,
+  videoFrameOcr: true,
+  videoFrameOcrIntervalSeconds: 30,
+  videoFrameOcrMaxFrames: 60
+};
+
 export async function extractDocument(
   path: string,
   ocrProvider?: OcrProvider | null,
   transcriptionProvider?: TranscriptionProvider | null,
-  pdfParser: PdfParserName = "liteparse"
+  options: Partial<ExtractionOptions> | PdfParserName = {}
 ): Promise<ExtractedDocument | null> {
-  const result = await extractEvidence(path, ocrProvider, transcriptionProvider, pdfParser);
+  const result = await extractEvidence(path, ocrProvider, transcriptionProvider, options);
   if (result.skipped || result.evidence.length === 0) return null;
 
   return {
@@ -76,8 +93,9 @@ export async function extractEvidence(
   path: string,
   ocrProvider?: OcrProvider | null,
   transcriptionProvider?: TranscriptionProvider | null,
-  pdfParser: PdfParserName = "liteparse"
+  options: Partial<ExtractionOptions> | PdfParserName = {}
 ): Promise<ExtractionResult> {
+  const extractionOptions = normalizeExtractionOptions(options);
   const fileStat = await stat(path);
   if (!fileStat.isFile()) {
     throw new Error(`Extraction path is not a file: ${path}`);
@@ -103,7 +121,7 @@ export async function extractEvidence(
   }
 
   if (extension === ".pdf") {
-    const pdf = await extractPdfEvidence(path, ocrProvider ?? null, pdfParser);
+    const pdf = await extractPdfEvidence(path, ocrProvider ?? null, extractionOptions);
     return {
       path,
       kind: "pdf",
@@ -114,15 +132,15 @@ export async function extractEvidence(
   }
 
   if (imageExtensions.has(extension)) {
-    return extractMediaEvidence(path, "image", ocrProvider ?? null, transcriptionProvider ?? null);
+    return extractMediaEvidence(path, "image", ocrProvider ?? null, transcriptionProvider ?? null, extractionOptions);
   }
 
   if (audioExtensions.has(extension)) {
-    return extractMediaEvidence(path, "audio", ocrProvider ?? null, transcriptionProvider ?? null);
+    return extractMediaEvidence(path, "audio", ocrProvider ?? null, transcriptionProvider ?? null, extractionOptions);
   }
 
   if (videoExtensions.has(extension)) {
-    return extractMediaEvidence(path, "video", ocrProvider ?? null, transcriptionProvider ?? null);
+    return extractMediaEvidence(path, "video", ocrProvider ?? null, transcriptionProvider ?? null, extractionOptions);
   }
 
   return { path, kind: "binary", evidence: [], pending: [], skipped: true };
@@ -131,24 +149,25 @@ export async function extractEvidence(
 async function extractPdfEvidence(
   path: string,
   ocrProvider: OcrProvider | null,
-  pdfParser: PdfParserName
+  options: ExtractionOptions
 ): Promise<{ evidence: ExtractedEvidence[]; pending: ExtractionPending[] }> {
-  if (pdfParser === "liteparse") {
-    return extractPdfEvidenceWithLiteParse(path, ocrProvider);
+  if (options.pdfParser === "liteparse") {
+    return extractPdfEvidenceWithLiteParse(path, ocrProvider, options);
   }
 
-  return extractPdfEvidenceWithPdftotext(path, ocrProvider);
+  return extractPdfEvidenceWithPdftotext(path, ocrProvider, options);
 }
 
 async function extractPdfEvidenceWithLiteParse(
   path: string,
-  ocrProvider: OcrProvider | null
+  ocrProvider: OcrProvider | null,
+  options: ExtractionOptions
 ): Promise<{ evidence: ExtractedEvidence[]; pending: ExtractionPending[] }> {
   let liteparse: ParseResult | null = null;
   try {
     liteparse = await parsePdfWithLiteParse(path);
   } catch {
-    return extractPdfEvidenceWithPdftotext(path, ocrProvider);
+    return extractPdfEvidenceWithPdftotext(path, ocrProvider, options);
   }
 
   const pageCount = await getPdfPageCount(path);
@@ -157,11 +176,12 @@ async function extractPdfEvidenceWithLiteParse(
   const maxPage = pageCount ?? Math.max(...pages.map((page) => page.pageNum), 0);
 
   if (maxPage === 0) {
-    return extractPdfEvidenceWithPdftotext(path, ocrProvider);
+    return extractPdfEvidenceWithPdftotext(path, ocrProvider, options);
   }
 
   const evidence: ExtractedEvidence[] = [];
   const pending: ExtractionPending[] = [];
+  let ocrAttempts = 0;
 
   for (let page = 1; page <= maxPage; page += 1) {
     const liteparsePage = pagesByNumber.get(page);
@@ -171,7 +191,13 @@ async function extractPdfEvidenceWithLiteParse(
       continue;
     }
 
-    const fallback = await extractPdfPageWithPdftotextOrOcr(path, page, ocrProvider);
+    const fallback = await extractPdfPageWithPdftotextOrOcr(
+      path,
+      page,
+      ocrProvider,
+      ocrAttempts < options.pdfOcrMaxPages
+    );
+    if (fallback.usedOcrAttempt) ocrAttempts += 1;
     if (fallback.evidence) evidence.push(fallback.evidence);
     if (fallback.pending) pending.push(fallback.pending);
   }
@@ -181,7 +207,8 @@ async function extractPdfEvidenceWithLiteParse(
 
 async function extractPdfEvidenceWithPdftotext(
   path: string,
-  ocrProvider: OcrProvider | null
+  ocrProvider: OcrProvider | null,
+  options: ExtractionOptions
 ): Promise<{ evidence: ExtractedEvidence[]; pending: ExtractionPending[] }> {
   const pageCount = await getPdfPageCount(path);
   if (pageCount === null) {
@@ -221,9 +248,16 @@ async function extractPdfEvidenceWithPdftotext(
 
   const evidence: ExtractedEvidence[] = [];
   const pending: ExtractionPending[] = [];
+  let ocrAttempts = 0;
 
   for (let page = 1; page <= pageCount; page += 1) {
-    const fallback = await extractPdfPageWithPdftotextOrOcr(path, page, ocrProvider);
+    const fallback = await extractPdfPageWithPdftotextOrOcr(
+      path,
+      page,
+      ocrProvider,
+      ocrAttempts < options.pdfOcrMaxPages
+    );
+    if (fallback.usedOcrAttempt) ocrAttempts += 1;
     if (fallback.evidence) evidence.push(fallback.evidence);
     if (fallback.pending) pending.push(fallback.pending);
   }
@@ -256,8 +290,9 @@ function pagesFromFullText(text: string): ParsedPage[] {
 async function extractPdfPageWithPdftotextOrOcr(
   path: string,
   page: number,
-  ocrProvider: OcrProvider | null
-): Promise<{ evidence?: ExtractedEvidence; pending?: ExtractionPending }> {
+  ocrProvider: OcrProvider | null,
+  allowOcr: boolean
+): Promise<{ evidence?: ExtractedEvidence; pending?: ExtractionPending; usedOcrAttempt?: boolean }> {
   let pdftotextError: unknown = null;
   try {
     const result = await runCommand("pdftotext", ["-f", String(page), "-l", String(page), "-layout", path, "-"]);
@@ -282,12 +317,18 @@ async function extractPdfPageWithPdftotextOrOcr(
     };
   }
 
+  if (!allowOcr) {
+    return {
+      pending: createPdfOcrPending(path, page, "PDF OCR max pages limit reached.")
+    };
+  }
+
   try {
     const imagePath = await renderPdfPage(path, page);
     const ocr = await ocrProvider.extractText({ imagePath, mode: "text" });
-    return { evidence: pdfOcrEvidence(path, page, ocr.text, ocr.provider, ocr.model) };
+    return { evidence: pdfOcrEvidence(path, page, ocr.text, ocr.provider, ocr.model), usedOcrAttempt: true };
   } catch (error) {
-    return { pending: createPdfOcrPending(path, page, error) };
+    return { pending: createPdfOcrPending(path, page, error), usedOcrAttempt: true };
   }
 }
 
@@ -303,20 +344,19 @@ async function extractMediaEvidence(
   path: string,
   kind: "image" | "audio" | "video",
   ocrProvider: OcrProvider | null,
-  transcriptionProvider: TranscriptionProvider | null
+  transcriptionProvider: TranscriptionProvider | null,
+  options: ExtractionOptions
 ): Promise<ExtractionResult> {
   const sidecar = await readFirstExisting(kind === "image"
     ? [`${path}.ocr.txt`, `${path}.txt`, `${path}.md`]
     : [`${path}.transcript.txt`, `${path}.txt`, `${path}.md`]);
 
   const pending: ExtractionPending[] = [];
+  const evidence: ExtractedEvidence[] = [];
   if (kind === "image" && ocrProvider) {
     try {
       const ocr = await ocrProvider.extractText({ imagePath: path });
-      return {
-        path,
-        kind,
-        evidence: [{
+      evidence.push({
           sourcePath: path,
           sourceKind: kind,
           modality: "image_ocr",
@@ -325,12 +365,10 @@ async function extractMediaEvidence(
           metadata: {
             extension: extensionOf(path),
             extractor: ocr.provider,
-            model: ocr.model
+            model: ocr.model,
+            ocrMode: "text"
           }
-        }],
-        pending,
-        skipped: false
-      };
+        });
     } catch (error) {
       pending.push(createPendingExtraction(path, kind, error));
     }
@@ -339,25 +377,7 @@ async function extractMediaEvidence(
       try {
         const audioPath = kind === "audio" ? path : await extractAudioForTranscription(path);
         const transcript = await transcriptionProvider.transcribe({ audioPath });
-        return {
-          path,
-          kind,
-          evidence: [{
-            sourcePath: path,
-            sourceKind: kind,
-            modality: kind === "audio" ? "audio_transcript" : "video_transcript",
-            text: transcript.text,
-            locator: {},
-            metadata: {
-              extension: extensionOf(path),
-              extractor: transcript.provider,
-              model: transcript.model,
-              language: transcript.language
-            }
-          }],
-          pending,
-          skipped: false
-        };
+        evidence.push(...transcriptEvidence(path, kind, transcript));
       } catch (error) {
         pending.push(createTranscriptionPending(path, kind, error));
       }
@@ -366,14 +386,40 @@ async function extractMediaEvidence(
     }
   }
 
-  if (!sidecar) {
+  if (kind === "video" && options.videoFrameOcr && ocrProvider) {
+    try {
+      const frames = await sampleVideoFramesForOcr(
+        path,
+        options.videoFrameOcrIntervalSeconds,
+        options.videoFrameOcrMaxFrames
+      );
+
+      for (const frame of frames) {
+        try {
+          const ocr = await ocrProvider.extractText({ imagePath: frame.framePath, mode: "text" });
+          evidence.push(videoFrameOcrEvidence(path, frame.framePath, frame.timestampMs, ocr.text, ocr.provider, ocr.model));
+        } catch (error) {
+          pending.push(createVideoFrameOcrPending(path, error));
+          break;
+        }
+      }
+    } catch (error) {
+      pending.push(createVideoFrameOcrPending(path, error));
+    }
+  }
+
+  if (evidence.length > 0) {
     return {
       path,
       kind,
-      evidence: [],
+      evidence,
       pending,
       skipped: false
     };
+  }
+
+  if (!sidecar) {
+    return { path, kind, evidence: [], pending, skipped: false };
   }
 
   return {
@@ -394,6 +440,45 @@ async function extractMediaEvidence(
     pending,
     skipped: false
   };
+}
+
+function transcriptEvidence(
+  path: string,
+  kind: "audio" | "video",
+  transcript: TranscriptionResponse
+): ExtractedEvidence[] {
+  const modality = kind === "audio" ? "audio_transcript" : "video_transcript";
+  const baseMetadata = {
+    extension: extensionOf(path),
+    extractor: transcript.provider,
+    model: transcript.model,
+    language: transcript.language
+  };
+
+  if (transcript.segments && transcript.segments.length > 0) {
+    return transcript.segments.map((segment, index) => ({
+      sourcePath: path,
+      sourceKind: kind,
+      modality,
+      text: segment.text,
+      locator: { timestampMs: segment.startMs },
+      metadata: {
+        ...baseMetadata,
+        segmentIndex: index,
+        startMs: segment.startMs,
+        endMs: segment.endMs
+      }
+    }));
+  }
+
+  return [{
+    sourcePath: path,
+    sourceKind: kind,
+    modality,
+    text: transcript.text,
+    locator: {},
+    metadata: baseMetadata
+  }];
 }
 
 function sidecarModality(kind: "image" | "audio" | "video"): ExtractedEvidence["modality"] {
@@ -425,6 +510,17 @@ function createTranscriptionPending(path: string, kind: "audio" | "video", error
     pending: true,
     reason: `Video/audio transcription with Cohere Transcribe is pending.${detail}`,
     requiredExtractor: "cohere-api"
+  };
+}
+
+function createVideoFrameOcrPending(path: string, error?: unknown): ExtractionPending {
+  const detail = error instanceof Error ? ` ${error.message}` : "";
+  return {
+    sourcePath: path,
+    sourceKind: "video",
+    pending: true,
+    reason: `Video frame OCR with GLM-OCR is pending.${detail}`,
+    requiredExtractor: "ollama-glm-ocr"
   };
 }
 
@@ -463,6 +559,29 @@ function pdfOcrEvidence(path: string, page: number, text: string, extractor: str
     text,
     locator: { page },
     metadata: { extension: ".pdf", extractor, model }
+  };
+}
+
+function videoFrameOcrEvidence(
+  path: string,
+  framePath: string,
+  timestampMs: number,
+  text: string,
+  extractor: string,
+  model: string
+): ExtractedEvidence {
+  return {
+    sourcePath: path,
+    sourceKind: "video",
+    modality: "video_frame_ocr",
+    text,
+    locator: { timestampMs, framePath },
+    metadata: {
+      extension: extensionOf(path),
+      extractor,
+      model,
+      ocrMode: "text"
+    }
   };
 }
 
@@ -537,6 +656,57 @@ async function extractAudioForTranscription(path: string): Promise<string> {
   }
 
   return outputPath;
+}
+
+async function sampleVideoFramesForOcr(
+  path: string,
+  intervalSeconds: number,
+  maxFrames: number
+): Promise<Array<{ framePath: string; timestampMs: number }>> {
+  if (maxFrames <= 0) return [];
+
+  const directory = join(
+    ".turbosearch/video-frames",
+    `${basename(path).replace(/[^a-zA-Z0-9._-]/g, "_")}-${sha256Text(path).slice(0, 12)}`
+  );
+  await rm(directory, { recursive: true, force: true });
+  await mkdir(directory, { recursive: true });
+
+  const safeIntervalSeconds = Math.max(1, intervalSeconds);
+  const result = await runCommand("ffmpeg", [
+    "-y",
+    "-i",
+    path,
+    "-vf",
+    `fps=1/${safeIntervalSeconds}`,
+    "-frames:v",
+    String(maxFrames),
+    "-q:v",
+    "2",
+    join(directory, "frame-%05d.png")
+  ]);
+
+  if (result.exitCode !== 0) {
+    throw new Error(`Failed to sample video frames with ffmpeg: ${result.stderr || result.stdout}`);
+  }
+
+  const files = (await readdir(directory))
+    .filter((file) => file.endsWith(".png"))
+    .sort()
+    .slice(0, maxFrames);
+
+  return files.map((file, index) => ({
+    framePath: join(directory, file),
+    timestampMs: index * safeIntervalSeconds * 1000
+  }));
+}
+
+function normalizeExtractionOptions(options: Partial<ExtractionOptions> | PdfParserName): ExtractionOptions {
+  if (typeof options === "string") {
+    return { ...defaultExtractionOptions, pdfParser: options };
+  }
+
+  return { ...defaultExtractionOptions, ...options };
 }
 
 export async function extractPdfText(path: string): Promise<string> {

@@ -13,6 +13,13 @@ export type TranscriptionResponse = {
   model: string;
   provider: TranscriptionProviderName;
   language?: string;
+  segments?: TranscriptionSegment[];
+};
+
+export type TranscriptionSegment = {
+  text: string;
+  startMs: number;
+  endMs: number;
 };
 
 export interface TranscriptionProvider {

@@ -88,7 +88,13 @@ async function runExtract(args: ParsedArgs, payload: JsonPayload, config: AppCon
   const transcriptionProvider = createTranscriptionProvider(config);
   const results = [];
   for (const path of paths) {
-    results.push(await extractEvidence(path, ocrProvider, transcriptionProvider, config.pdfParser));
+    results.push(await extractEvidence(path, ocrProvider, transcriptionProvider, {
+      pdfParser: config.pdfParser,
+      pdfOcrMaxPages: config.pdfOcrMaxPages,
+      videoFrameOcr: config.videoFrameOcr,
+      videoFrameOcrIntervalSeconds: config.videoFrameOcrIntervalSeconds,
+      videoFrameOcrMaxFrames: config.videoFrameOcrMaxFrames
+    }));
   }
 
   writeJson({ ok: true, command: "extract", results });
@@ -101,9 +107,13 @@ function configFromArgs(args: ParsedArgs, payload: JsonPayload): AppConfig {
     pdfParser: parsePdfParser(
       getValue(args.flags["pdf-parser"], payload.pdfParser) ?? process.env.TURBOSEARCH_PDF_PARSER
     ),
+    pdfOcrMaxPages: getNumber(payload, "pdfOcrMaxPages") ?? Number(args.flags["pdf-ocr-max-pages"] ?? process.env.TURBOSEARCH_PDF_OCR_MAX_PAGES ?? 200),
     ocrProvider: parseOcrProvider(getValue(args.flags.ocr, payload.ocrProvider)),
     ollamaBaseUrl: getString(payload, "ollamaBaseUrl") ?? String(args.flags["ollama-base-url"] ?? process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434"),
     ollamaGlmOcrModel: getString(payload, "ollamaGlmOcrModel") ?? String(args.flags["ollama-glm-ocr-model"] ?? process.env.OLLAMA_GLM_OCR_MODEL ?? "glm-ocr:latest"),
+    vllmGlmOcrBaseUrl: getString(payload, "vllmGlmOcrBaseUrl") ?? String(args.flags["vllm-glm-ocr-base-url"] ?? process.env.VLLM_GLM_OCR_BASE_URL ?? "http://127.0.0.1:8000/v1"),
+    vllmGlmOcrApiKey: getString(payload, "vllmGlmOcrApiKey") ?? String(args.flags["vllm-glm-ocr-api-key"] ?? process.env.VLLM_GLM_OCR_API_KEY ?? ""),
+    vllmGlmOcrModel: getString(payload, "vllmGlmOcrModel") ?? String(args.flags["vllm-glm-ocr-model"] ?? process.env.VLLM_GLM_OCR_MODEL ?? "zai-org/GLM-OCR"),
     ocrMode: parseOcrMode(getValue(args.flags["ocr-mode"], payload.ocrMode)),
     ocrPrompt: getString(payload, "ocrPrompt") ?? String(args.flags["ocr-prompt"] ?? process.env.TURBOSEARCH_OCR_PROMPT ?? "Text Recognition:"),
     ocrContextTokens: getNumber(payload, "ocrContextTokens") ?? Number(args.flags["ocr-context-tokens"] ?? process.env.TURBOSEARCH_OCR_CONTEXT_TOKENS ?? 8192),
@@ -113,6 +123,9 @@ function configFromArgs(args: ParsedArgs, payload: JsonPayload): AppConfig {
     cohereTranscribeEndpoint: getString(payload, "cohereTranscribeEndpoint") ?? String(args.flags["cohere-transcribe-endpoint"] ?? process.env.COHERE_TRANSCRIBE_ENDPOINT ?? "https://api.cohere.com/v2/audio/transcriptions"),
     cohereTranscribeModel: getString(payload, "cohereTranscribeModel") ?? String(args.flags["cohere-transcribe-model"] ?? process.env.COHERE_TRANSCRIBE_MODEL ?? "cohere-transcribe-03-2026"),
     cohereTranscribeLanguage: getString(payload, "cohereTranscribeLanguage") ?? String(args.flags["cohere-transcribe-language"] ?? process.env.COHERE_TRANSCRIBE_LANGUAGE ?? "en"),
+    videoFrameOcr: parseBoolean(getValue(args.flags["video-frame-ocr"], payload.videoFrameOcr) ?? process.env.TURBOSEARCH_VIDEO_FRAME_OCR, true),
+    videoFrameOcrIntervalSeconds: getNumber(payload, "videoFrameOcrIntervalSeconds") ?? Number(args.flags["video-frame-ocr-interval"] ?? process.env.TURBOSEARCH_VIDEO_FRAME_OCR_INTERVAL_SECONDS ?? 30),
+    videoFrameOcrMaxFrames: getNumber(payload, "videoFrameOcrMaxFrames") ?? Number(args.flags["video-frame-ocr-max-frames"] ?? process.env.TURBOSEARCH_VIDEO_FRAME_OCR_MAX_FRAMES ?? 60),
     turboBits: getNumber(payload, "turboBits") ?? Number(args.flags["turbo-bits"] ?? process.env.TURBOSEARCH_TURBO_BITS ?? 4),
     turboRerankLimit: getNumber(payload, "turboRerank") ?? Number(args.flags["turbo-rerank"] ?? process.env.TURBOSEARCH_TURBO_RERANK_LIMIT ?? 80)
   });
@@ -156,6 +169,14 @@ function parseBackend(value: string | boolean | undefined): SearchBackendName {
   if (value === "turbo") return "turbo";
   if (value === "exact" || value === undefined || value === false) return "exact";
   throw new Error(`Unsupported backend: ${String(value)}`);
+}
+
+function parseBoolean(value: string | boolean | undefined, defaultValue: boolean): boolean {
+  if (typeof value === "boolean") return value;
+  if (value === undefined) return defaultValue;
+  if (value === "true" || value === "1" || value === "yes") return true;
+  if (value === "false" || value === "0" || value === "no") return false;
+  throw new Error(`Unsupported boolean value: ${String(value)}`);
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -218,8 +239,18 @@ Options:
   --ocr            ollama-glm-ocr by default; use none to skip OCR or vllm-glm-ocr for prod placeholder
   --ocr-mode       text, table, formula, or figure
   --transcription  none by default; cohere-api or vllm-cohere-transcribe
+  --pdf-ocr-max-pages
+                   Max scanned/sparse PDF pages to OCR, default 200
+  --video-frame-ocr
+                   true by default; set false to skip visual OCR on videos
+  --video-frame-ocr-interval
+                   Seconds between sampled video frames, default 30
+  --video-frame-ocr-max-frames
+                   Max video frames to OCR per file, default 60
   --ollama-base-url
                    Ollama base URL, default http://127.0.0.1:11434
+  --vllm-glm-ocr-base-url
+                   OpenAI-compatible vLLM base URL, default http://127.0.0.1:8000/v1
   --json           read a JSON request from the next argument, or stdin when no value is provided
   --jsonl          stream ingestion events as JSON Lines
   --turbo-bits     compressed backend bit width, default 4

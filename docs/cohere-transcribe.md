@@ -64,3 +64,9 @@ COHERE_TRANSCRIBE_MODEL=CohereLabs/cohere-transcribe-03-2026
 ```
 
 Video files are converted to mono 16k WAV with `ffmpeg` before transcription. Audio files are sent directly.
+
+## Timestamp Support
+
+Cohere's current hosted Transcribe API returns transcript text. Cohere's model documentation says timestamps and speaker diarization are not supported by this model.
+
+TurboSearch stores Cohere API output as an untimestamped transcript block. The internal transcription contract supports timestamped `segments`, but only providers that return real segment timestamps should populate them. TurboSearch intentionally does not infer transcript timestamps from text position.

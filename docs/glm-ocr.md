@@ -2,7 +2,7 @@
 
 TurboSearch will use Z.ai GLM-OCR as the local OCR model for image evidence and video frame OCR.
 
-Current status: Ollama local provider wired for images; vLLM production provider reserved but not wired yet.
+Current status: Ollama local provider is wired for images, scanned PDF pages, and video frames. The vLLM provider is wired against an OpenAI-compatible `/v1/chat/completions` vision endpoint for production deployments.
 
 References:
 
@@ -24,7 +24,7 @@ Known model facts from the docs:
 TurboSearch uses a provider boundary:
 
 - local development: Ollama with `glm-ocr:latest`
-- production: vLLM GLM-OCR service, pending exact deployment contract
+- production: vLLM GLM-OCR service through an OpenAI-compatible vision endpoint
 
 The code calls Ollama directly from Bun for local development. It uses Ollama's native API rather than an OpenAI-compatible endpoint because the upstream GLM-OCR Ollama guide recommends native `/api/generate` for vision requests.
 
@@ -101,13 +101,15 @@ Set `TURBOSEARCH_OCR_MODE=table` or pass JSON like `{"ocrMode":"table"}` for kno
 
 ## Production vLLM Plan
 
-Keep the TypeScript interface stable and add a `vllm-glm-ocr` provider once the production server contract is chosen.
+The `vllm-glm-ocr` provider sends an OpenAI-compatible chat completion request with a text OCR prompt and a base64 data URL image.
 
 Expected env:
 
 ```bash
 TURBOSEARCH_OCR_PROVIDER=vllm-glm-ocr
-GLM_OCR_ENDPOINT=http://internal-ocr:8000
+VLLM_GLM_OCR_BASE_URL=http://internal-ocr:8000/v1
+VLLM_GLM_OCR_API_KEY=
+VLLM_GLM_OCR_MODEL=zai-org/GLM-OCR
 ```
 
-Open production decision: whether vLLM should expose an OpenAI-compatible vision endpoint or a small custom `/ocr` service that normalizes responses into text, Markdown, and optional blocks.
+If the production deployment uses a custom `/ocr` endpoint instead, keep the provider interface stable and adapt only `src/ocr/providers/vllm.ts`.

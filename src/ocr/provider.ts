@@ -24,7 +24,14 @@ export function createOcrProvider(config: AppConfig): OcrProvider | null {
   if (config.ocrProvider === "none") return null;
 
   if (config.ocrProvider === "vllm-glm-ocr") {
-    return new VllmGlmOcrProvider();
+    return new VllmGlmOcrProvider({
+      baseUrl: config.vllmGlmOcrBaseUrl,
+      apiKey: config.vllmGlmOcrApiKey,
+      model: config.vllmGlmOcrModel,
+      defaultMode: config.ocrMode,
+      defaultPrompt: config.ocrPrompt,
+      maxOutputTokens: config.ocrMaxOutputTokens
+    });
   }
 
   return new OllamaGlmOcrProvider({

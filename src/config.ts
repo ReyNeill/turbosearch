@@ -20,9 +20,13 @@ export type AppConfig = {
   turboRerankLimit: number;
   defaultBackend: SearchBackendName;
   pdfParser: PdfParserName;
+  pdfOcrMaxPages: number;
   ocrProvider: OcrProviderName;
   ollamaBaseUrl: string;
   ollamaGlmOcrModel: string;
+  vllmGlmOcrBaseUrl: string;
+  vllmGlmOcrApiKey: string;
+  vllmGlmOcrModel: string;
   ocrMode: OcrMode;
   ocrPrompt: string;
   ocrContextTokens: number;
@@ -32,6 +36,9 @@ export type AppConfig = {
   cohereTranscribeEndpoint: string;
   cohereTranscribeModel: string;
   cohereTranscribeLanguage: string;
+  videoFrameOcr: boolean;
+  videoFrameOcrIntervalSeconds: number;
+  videoFrameOcrMaxFrames: number;
 };
 
 export function loadEnvLocal(cwd = process.cwd()): void {
@@ -66,9 +73,13 @@ export function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     turboRerankLimit: Number(process.env.TURBOSEARCH_TURBO_RERANK_LIMIT ?? 80),
     defaultBackend: "exact",
     pdfParser: parsePdfParser(process.env.TURBOSEARCH_PDF_PARSER),
+    pdfOcrMaxPages: Number(process.env.TURBOSEARCH_PDF_OCR_MAX_PAGES ?? 200),
     ocrProvider: parseOcrProvider(process.env.TURBOSEARCH_OCR_PROVIDER),
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434",
     ollamaGlmOcrModel: process.env.OLLAMA_GLM_OCR_MODEL ?? "glm-ocr:latest",
+    vllmGlmOcrBaseUrl: process.env.VLLM_GLM_OCR_BASE_URL ?? "http://127.0.0.1:8000/v1",
+    vllmGlmOcrApiKey: process.env.VLLM_GLM_OCR_API_KEY ?? "",
+    vllmGlmOcrModel: process.env.VLLM_GLM_OCR_MODEL ?? "zai-org/GLM-OCR",
     ocrMode: parseOcrMode(process.env.TURBOSEARCH_OCR_MODE),
     ocrPrompt: process.env.TURBOSEARCH_OCR_PROMPT ?? "",
     ocrContextTokens: Number(process.env.TURBOSEARCH_OCR_CONTEXT_TOKENS ?? 8192),
@@ -78,6 +89,9 @@ export function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     cohereTranscribeEndpoint: process.env.COHERE_TRANSCRIBE_ENDPOINT ?? "https://api.cohere.com/v2/audio/transcriptions",
     cohereTranscribeModel: process.env.COHERE_TRANSCRIBE_MODEL ?? "cohere-transcribe-03-2026",
     cohereTranscribeLanguage: process.env.COHERE_TRANSCRIBE_LANGUAGE ?? "en",
+    videoFrameOcr: parseBoolean(process.env.TURBOSEARCH_VIDEO_FRAME_OCR, true),
+    videoFrameOcrIntervalSeconds: Number(process.env.TURBOSEARCH_VIDEO_FRAME_OCR_INTERVAL_SECONDS ?? 30),
+    videoFrameOcrMaxFrames: Number(process.env.TURBOSEARCH_VIDEO_FRAME_OCR_MAX_FRAMES ?? 60),
     ...overrides
   };
 }
@@ -110,4 +124,11 @@ function parseTranscriptionProvider(value: string | undefined): TranscriptionPro
   if (value === "vllm-cohere-transcribe") return "vllm-cohere-transcribe";
   if (value === "cohere-api") return "cohere-api";
   return "none";
+}
+
+function parseBoolean(value: string | undefined, defaultValue: boolean): boolean {
+  if (value === undefined) return defaultValue;
+  if (value === "true" || value === "1" || value === "yes") return true;
+  if (value === "false" || value === "0" || value === "no") return false;
+  return defaultValue;
 }

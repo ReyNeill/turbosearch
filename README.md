@@ -24,6 +24,9 @@ bun run src/cli.ts search "contract renewal terms" --embedding openai
 
 - Text and code file ingestion.
 - Page-aware PDF extraction through LiteParse first, then `pdftotext`, then GLM-OCR for scanned/sparse pages.
+- Image OCR through GLM-OCR, with sidecar fallback.
+- Audio/video transcription through Cohere Transcribe or a vLLM-compatible endpoint.
+- Video frame OCR with fixed-interval frame sampling and GLM-OCR.
 - SQLite chunk store with source metadata.
 - Exact cosine search.
 - Compressed TurboQuant-style candidate search with exact reranking.
@@ -48,14 +51,27 @@ bun run src/cli.ts ingest docs --jsonl
 
 Each line is an event such as `document_started`, `extraction_pending`, `document_indexed`, or `ingest_done`.
 
-## Multimodal Plan
+## Extraction Support
 
-Images and videos are currently indexed only when real text evidence exists as sidecar files:
+TurboSearch indexes only real extracted evidence. It does not index filenames as semantic evidence.
+
+| Input | Status | Evidence | Notes |
+| --- | --- | --- | --- |
+| Text/code/JSON/CSV/YAML/HTML | Good | Raw text chunks | Format-aware table chunking is still future work. |
+| PDF with embedded text | Good | Page text | LiteParse first, then `pdftotext`. |
+| Scanned/sparse PDF | Good | Per-page OCR text | Uses GLM-OCR after text parsers are sparse; capped by `TURBOSEARCH_PDF_OCR_MAX_PAGES`. |
+| Images | Good | OCR text | Uses GLM-OCR, or sidecar fallback. |
+| Audio | Good | Transcript text; timestamped segment evidence when provider returns real segments | Cohere Transcribe currently returns text only, without timestamps. |
+| Video audio | Good | Transcript text; timestamped segment evidence when provider returns real segments | Uses `ffmpeg` to extract WAV before transcription. |
+| Video frames | Good | OCR text with sampled frame path and timestamp | Fixed interval sampling, capped by max frames. |
+| DOCX/PPTX/XLSX | Missing | None | Next practical format family to add. |
+
+Sidecars are still supported as fallback evidence:
 
 - image sidecars: `image.png.ocr.txt`, `image.png.txt`, or `image.png.md`
 - video sidecars: `video.mp4.transcript.txt`, `video.mp4.ocr.txt`, `video.mp4.txt`, or `video.mp4.md`
 
-When sidecars are missing, extraction reports a pending local-model integration instead of indexing filenames as fake semantic evidence. PDFs use this chain:
+PDFs use this chain:
 
 1. LiteParse for layout-aware page text/table-shaped extraction.
 2. `pdftotext` for pages where LiteParse is unavailable or sparse.
@@ -63,17 +79,25 @@ When sidecars are missing, extraction reports a pending local-model integration 
 
 LiteParse OCR is intentionally disabled so OCR stays on the selected GLM-OCR provider.
 
-Selected/pending local model hooks:
+Selected model hooks:
 
 - images: Z.ai GLM-OCR through Ollama for local development
 - video/audio: Cohere Transcribe 03-2026 through Cohere API for testing, vLLM-compatible provider for private/prod
-- video frames: Z.ai GLM-OCR through Ollama after frame sampling
-- production OCR target: vLLM GLM-OCR provider
+- video frames: Z.ai GLM-OCR through Ollama or vLLM after fixed-interval frame sampling
+- production OCR target: vLLM GLM-OCR through an OpenAI-compatible vision endpoint
 
-GLM-OCR notes live in [docs/glm-ocr.md](docs/glm-ocr.md). Ollama is wired for local image OCR; vLLM is the production target and still needs the exact service contract.
+GLM-OCR notes live in [docs/glm-ocr.md](docs/glm-ocr.md). Ollama is wired for local OCR; vLLM is wired for production OCR through `/v1/chat/completions`.
 
 OCR prompt modes are available through `ocrMode`/`--ocr-mode`: `text`, `table`, `formula`, or `figure`. This is a manual routing knob for now, not auto-detection.
 
 Transcription is available through `transcriptionProvider`/`--transcription`: `cohere-api`, `vllm-cohere-transcribe`, or `none`. Video files require `ffmpeg`, which is used to extract WAV audio before transcription.
+
+Video frame OCR controls:
+
+```bash
+TURBOSEARCH_VIDEO_FRAME_OCR=true
+TURBOSEARCH_VIDEO_FRAME_OCR_INTERVAL_SECONDS=30
+TURBOSEARCH_VIDEO_FRAME_OCR_MAX_FRAMES=60
+```
 
 TurboQuant belongs in the vector backend, not in ingestion. The retrieval quality will mostly come from chunking, multimodal extraction, metadata filters, and reranking.

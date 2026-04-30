@@ -52,7 +52,13 @@ export class SearchEngine {
         file,
         this.ocrProvider,
         this.transcriptionProvider,
-        this.config.pdfParser
+        {
+          pdfParser: this.config.pdfParser,
+          pdfOcrMaxPages: this.config.pdfOcrMaxPages,
+          videoFrameOcr: this.config.videoFrameOcr,
+          videoFrameOcrIntervalSeconds: this.config.videoFrameOcrIntervalSeconds,
+          videoFrameOcrMaxFrames: this.config.videoFrameOcrMaxFrames
+        }
       );
       summary.pendingExtractions += extraction.pending.length;
       for (const pending of extraction.pending) {
