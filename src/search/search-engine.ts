@@ -48,7 +48,12 @@ export class SearchEngine {
 
     for (const file of files) {
       onEvent?.({ type: "document_started", path: file });
-      const extraction = await extractEvidence(file, this.ocrProvider, this.transcriptionProvider);
+      const extraction = await extractEvidence(
+        file,
+        this.ocrProvider,
+        this.transcriptionProvider,
+        this.config.pdfParser
+      );
       summary.pendingExtractions += extraction.pending.length;
       for (const pending of extraction.pending) {
         onEvent?.({

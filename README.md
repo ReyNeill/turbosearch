@@ -23,7 +23,7 @@ bun run src/cli.ts search "contract renewal terms" --embedding openai
 ## What Works Now
 
 - Text and code file ingestion.
-- Page-aware PDF text extraction through `pdfinfo`/`pdftotext` when available.
+- Page-aware PDF extraction through LiteParse first, then `pdftotext`, then GLM-OCR for scanned/sparse pages.
 - SQLite chunk store with source metadata.
 - Exact cosine search.
 - Compressed TurboQuant-style candidate search with exact reranking.
@@ -37,7 +37,7 @@ One-shot JSON requests are meant for agent tools:
 ```bash
 bun run src/cli.ts ingest --json '{"paths":["docs"],"db":".turbosearch/index.sqlite"}'
 bun run src/cli.ts search --json '{"query":"TurboQuant semantic search","backend":"turbo","k":5}'
-bun run src/cli.ts extract --json '{"paths":["docs/turboquant.pdf"]}'
+bun run src/cli.ts extract --json '{"paths":["docs/turboquant.pdf"],"pdfParser":"liteparse"}'
 ```
 
 Use JSON Lines when a human or agent wants progress while ingestion runs:
@@ -55,7 +55,13 @@ Images and videos are currently indexed only when real text evidence exists as s
 - image sidecars: `image.png.ocr.txt`, `image.png.txt`, or `image.png.md`
 - video sidecars: `video.mp4.transcript.txt`, `video.mp4.ocr.txt`, `video.mp4.txt`, or `video.mp4.md`
 
-When sidecars are missing, extraction reports a pending local-model integration instead of indexing filenames as fake semantic evidence. Scanned PDF pages fall back to GLM-OCR when `pdftotext` finds little or no embedded text.
+When sidecars are missing, extraction reports a pending local-model integration instead of indexing filenames as fake semantic evidence. PDFs use this chain:
+
+1. LiteParse for layout-aware page text/table-shaped extraction.
+2. `pdftotext` for pages where LiteParse is unavailable or sparse.
+3. GLM-OCR for scanned/sparse pages after both text parsers fail to produce enough evidence.
+
+LiteParse OCR is intentionally disabled so OCR stays on the selected GLM-OCR provider.
 
 Selected/pending local model hooks:
 

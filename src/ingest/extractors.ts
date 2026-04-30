@@ -1,11 +1,13 @@
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { basename, join } from "node:path";
+import { LiteParse, type ParseResult, type ParsedPage } from "@llamaindex/liteparse";
 import type {
   ExtractedDocument,
   ExtractedEvidence,
   ExtractionPending,
-  ExtractionResult
+  ExtractionResult,
+  PdfParserName
 } from "../types.ts";
 import type { OcrProvider } from "../ocr/provider.ts";
 import type { TranscriptionProvider } from "../transcription/provider.ts";
@@ -48,9 +50,10 @@ const videoExtensions = new Set([".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"
 export async function extractDocument(
   path: string,
   ocrProvider?: OcrProvider | null,
-  transcriptionProvider?: TranscriptionProvider | null
+  transcriptionProvider?: TranscriptionProvider | null,
+  pdfParser: PdfParserName = "liteparse"
 ): Promise<ExtractedDocument | null> {
-  const result = await extractEvidence(path, ocrProvider, transcriptionProvider);
+  const result = await extractEvidence(path, ocrProvider, transcriptionProvider, pdfParser);
   if (result.skipped || result.evidence.length === 0) return null;
 
   return {
@@ -72,7 +75,8 @@ export async function extractDocument(
 export async function extractEvidence(
   path: string,
   ocrProvider?: OcrProvider | null,
-  transcriptionProvider?: TranscriptionProvider | null
+  transcriptionProvider?: TranscriptionProvider | null,
+  pdfParser: PdfParserName = "liteparse"
 ): Promise<ExtractionResult> {
   const fileStat = await stat(path);
   if (!fileStat.isFile()) {
@@ -99,7 +103,7 @@ export async function extractEvidence(
   }
 
   if (extension === ".pdf") {
-    const pdf = await extractPdfEvidence(path, ocrProvider ?? null);
+    const pdf = await extractPdfEvidence(path, ocrProvider ?? null, pdfParser);
     return {
       path,
       kind: "pdf",
@@ -125,6 +129,57 @@ export async function extractEvidence(
 }
 
 async function extractPdfEvidence(
+  path: string,
+  ocrProvider: OcrProvider | null,
+  pdfParser: PdfParserName
+): Promise<{ evidence: ExtractedEvidence[]; pending: ExtractionPending[] }> {
+  if (pdfParser === "liteparse") {
+    return extractPdfEvidenceWithLiteParse(path, ocrProvider);
+  }
+
+  return extractPdfEvidenceWithPdftotext(path, ocrProvider);
+}
+
+async function extractPdfEvidenceWithLiteParse(
+  path: string,
+  ocrProvider: OcrProvider | null
+): Promise<{ evidence: ExtractedEvidence[]; pending: ExtractionPending[] }> {
+  let liteparse: ParseResult | null = null;
+  try {
+    liteparse = await parsePdfWithLiteParse(path);
+  } catch {
+    return extractPdfEvidenceWithPdftotext(path, ocrProvider);
+  }
+
+  const pageCount = await getPdfPageCount(path);
+  const pages = liteparse.pages.length > 0 ? liteparse.pages : pagesFromFullText(liteparse.text);
+  const pagesByNumber = new Map(pages.map((page) => [page.pageNum, page]));
+  const maxPage = pageCount ?? Math.max(...pages.map((page) => page.pageNum), 0);
+
+  if (maxPage === 0) {
+    return extractPdfEvidenceWithPdftotext(path, ocrProvider);
+  }
+
+  const evidence: ExtractedEvidence[] = [];
+  const pending: ExtractionPending[] = [];
+
+  for (let page = 1; page <= maxPage; page += 1) {
+    const liteparsePage = pagesByNumber.get(page);
+    const liteparseText = liteparsePage?.text.trim() ?? "";
+    if (!isSparsePdfText(liteparseText)) {
+      evidence.push(pdfTextEvidence(path, page, liteparseText, "liteparse", liteparseMetadata(liteparsePage)));
+      continue;
+    }
+
+    const fallback = await extractPdfPageWithPdftotextOrOcr(path, page, ocrProvider);
+    if (fallback.evidence) evidence.push(fallback.evidence);
+    if (fallback.pending) pending.push(fallback.pending);
+  }
+
+  return { evidence, pending };
+}
+
+async function extractPdfEvidenceWithPdftotext(
   path: string,
   ocrProvider: OcrProvider | null
 ): Promise<{ evidence: ExtractedEvidence[]; pending: ExtractionPending[] }> {
@@ -168,32 +223,72 @@ async function extractPdfEvidence(
   const pending: ExtractionPending[] = [];
 
   for (let page = 1; page <= pageCount; page += 1) {
-    const result = await runCommand("pdftotext", ["-f", String(page), "-l", String(page), "-layout", path, "-"]);
-    if (result.exitCode !== 0) {
-      throw new Error(`Failed to extract PDF page ${page} from ${path}. Install poppler/pdftotext.`);
-    }
-
-    const text = result.stdout.trim();
-    if (!isSparsePdfText(text)) {
-      evidence.push(pdfTextEvidence(path, page, text));
-      continue;
-    }
-
-    if (!ocrProvider) {
-      pending.push(createPdfOcrPending(path, page, "PDF page has little/no extractable text and OCR is disabled."));
-      continue;
-    }
-
-    try {
-      const imagePath = await renderPdfPage(path, page);
-      const ocr = await ocrProvider.extractText({ imagePath, mode: "text" });
-      evidence.push(pdfOcrEvidence(path, page, ocr.text, ocr.provider, ocr.model));
-    } catch (error) {
-      pending.push(createPdfOcrPending(path, page, error));
-    }
+    const fallback = await extractPdfPageWithPdftotextOrOcr(path, page, ocrProvider);
+    if (fallback.evidence) evidence.push(fallback.evidence);
+    if (fallback.pending) pending.push(fallback.pending);
   }
 
   return { evidence, pending };
+}
+
+async function parsePdfWithLiteParse(path: string): Promise<ParseResult> {
+  const parser = new LiteParse({
+    ocrEnabled: false,
+    outputFormat: "json",
+    preciseBoundingBox: false,
+    preserveLayoutAlignmentAcrossPages: true
+  });
+  return parser.parse(path, true);
+}
+
+function pagesFromFullText(text: string): ParsedPage[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  return [{
+    pageNum: 1,
+    width: 0,
+    height: 0,
+    text: trimmed,
+    textItems: []
+  }];
+}
+
+async function extractPdfPageWithPdftotextOrOcr(
+  path: string,
+  page: number,
+  ocrProvider: OcrProvider | null
+): Promise<{ evidence?: ExtractedEvidence; pending?: ExtractionPending }> {
+  let pdftotextError: unknown = null;
+  try {
+    const result = await runCommand("pdftotext", ["-f", String(page), "-l", String(page), "-layout", path, "-"]);
+    if (result.exitCode === 0) {
+      const text = result.stdout.trim();
+      if (!isSparsePdfText(text)) {
+        return { evidence: pdfTextEvidence(path, page, text, "pdftotext") };
+      }
+    } else {
+      pdftotextError = result.stderr || result.stdout;
+    }
+  } catch (error) {
+    pdftotextError = error;
+  }
+
+  if (!ocrProvider) {
+    const detail = pdftotextError
+      ? `pdftotext fallback failed or was sparse: ${errorMessage(pdftotextError)}`
+      : "PDF page has little/no extractable text and OCR is disabled.";
+    return {
+      pending: createPdfOcrPending(path, page, detail)
+    };
+  }
+
+  try {
+    const imagePath = await renderPdfPage(path, page);
+    const ocr = await ocrProvider.extractText({ imagePath, mode: "text" });
+    return { evidence: pdfOcrEvidence(path, page, ocr.text, ocr.provider, ocr.model) };
+  } catch (error) {
+    return { pending: createPdfOcrPending(path, page, error) };
+  }
 }
 
 async function getPdfPageCount(path: string): Promise<number | null> {
@@ -333,14 +428,30 @@ function createTranscriptionPending(path: string, kind: "audio" | "video", error
   };
 }
 
-function pdfTextEvidence(path: string, page: number | undefined, text: string): ExtractedEvidence {
+function pdfTextEvidence(
+  path: string,
+  page: number | undefined,
+  text: string,
+  extractor: "liteparse" | "pdftotext" = "pdftotext",
+  metadata: Record<string, unknown> = {}
+): ExtractedEvidence {
   return {
     sourcePath: path,
     sourceKind: "pdf",
     modality: "pdf_text",
     text,
     locator: page ? { page } : {},
-    metadata: { extension: ".pdf", extractor: "pdftotext" }
+    metadata: { extension: ".pdf", extractor, ...metadata }
+  };
+}
+
+function liteparseMetadata(page: ParsedPage | undefined): Record<string, unknown> {
+  if (!page) return {};
+  return {
+    parser: "layout-aware",
+    pageWidth: page.width,
+    pageHeight: page.height,
+    textItems: page.textItems.length
   };
 }
 
@@ -356,7 +467,7 @@ function pdfOcrEvidence(path: string, page: number, text: string, extractor: str
 }
 
 function createPdfOcrPending(path: string, page: number | undefined, error: unknown): ExtractionPending {
-  const detail = error instanceof Error ? error.message : String(error);
+  const detail = errorMessage(error);
   return {
     sourcePath: path,
     sourceKind: "pdf",
@@ -364,6 +475,10 @@ function createPdfOcrPending(path: string, page: number | undefined, error: unkn
     reason: `PDF OCR is pending${page ? ` for page ${page}` : ""}. ${detail}`,
     requiredExtractor: "ollama-glm-ocr"
   };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isSparsePdfText(text: string): boolean {

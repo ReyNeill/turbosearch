@@ -3,6 +3,7 @@ export type SearchBackendName = "exact" | "turbo";
 export type OcrProviderName = "none" | "ollama-glm-ocr" | "vllm-glm-ocr";
 export type OcrMode = "text" | "table" | "formula" | "figure";
 export type TranscriptionProviderName = "none" | "cohere-api" | "vllm-cohere-transcribe";
+export type PdfParserName = "liteparse" | "pdftotext";
 
 export type SourceKind = "text" | "pdf" | "image" | "audio" | "video" | "binary";
 

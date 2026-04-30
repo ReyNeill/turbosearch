@@ -4,6 +4,7 @@ import type {
   EmbeddingProviderName,
   OcrMode,
   OcrProviderName,
+  PdfParserName,
   SearchBackendName,
   TranscriptionProviderName
 } from "./types.ts";
@@ -18,6 +19,7 @@ export type AppConfig = {
   turboBits: number;
   turboRerankLimit: number;
   defaultBackend: SearchBackendName;
+  pdfParser: PdfParserName;
   ocrProvider: OcrProviderName;
   ollamaBaseUrl: string;
   ollamaGlmOcrModel: string;
@@ -63,6 +65,7 @@ export function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     turboBits: Number(process.env.TURBOSEARCH_TURBO_BITS ?? 4),
     turboRerankLimit: Number(process.env.TURBOSEARCH_TURBO_RERANK_LIMIT ?? 80),
     defaultBackend: "exact",
+    pdfParser: parsePdfParser(process.env.TURBOSEARCH_PDF_PARSER),
     ocrProvider: parseOcrProvider(process.env.TURBOSEARCH_OCR_PROVIDER),
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434",
     ollamaGlmOcrModel: process.env.OLLAMA_GLM_OCR_MODEL ?? "glm-ocr:latest",
@@ -89,6 +92,11 @@ function parseOcrMode(value: string | undefined): OcrMode {
 function parseEmbeddingProvider(value: string | undefined): EmbeddingProviderName {
   if (value === "openai") return "openai";
   return "hash";
+}
+
+function parsePdfParser(value: string | undefined): PdfParserName {
+  if (value === "pdftotext") return "pdftotext";
+  return "liteparse";
 }
 
 function parseOcrProvider(value: string | undefined): OcrProviderName {

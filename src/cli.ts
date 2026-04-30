@@ -5,7 +5,7 @@ import { extractEvidence } from "./ingest/extractors.ts";
 import { createOcrProvider } from "./ocr/provider.ts";
 import { SearchEngine } from "./search/search-engine.ts";
 import { createTranscriptionProvider } from "./transcription/provider.ts";
-import type { EmbeddingProviderName, SearchBackendName } from "./types.ts";
+import type { EmbeddingProviderName, PdfParserName, SearchBackendName } from "./types.ts";
 
 type ParsedArgs = {
   command: string | undefined;
@@ -88,7 +88,7 @@ async function runExtract(args: ParsedArgs, payload: JsonPayload, config: AppCon
   const transcriptionProvider = createTranscriptionProvider(config);
   const results = [];
   for (const path of paths) {
-    results.push(await extractEvidence(path, ocrProvider, transcriptionProvider));
+    results.push(await extractEvidence(path, ocrProvider, transcriptionProvider, config.pdfParser));
   }
 
   writeJson({ ok: true, command: "extract", results });
@@ -98,6 +98,9 @@ function configFromArgs(args: ParsedArgs, payload: JsonPayload): AppConfig {
   return createConfig({
     dbPath: getString(payload, "db") ?? String(args.flags.db ?? ".turbosearch/index.sqlite"),
     embeddingProvider: parseEmbeddingProvider(getValue(args.flags.embedding, payload.embedding)),
+    pdfParser: parsePdfParser(
+      getValue(args.flags["pdf-parser"], payload.pdfParser) ?? process.env.TURBOSEARCH_PDF_PARSER
+    ),
     ocrProvider: parseOcrProvider(getValue(args.flags.ocr, payload.ocrProvider)),
     ollamaBaseUrl: getString(payload, "ollamaBaseUrl") ?? String(args.flags["ollama-base-url"] ?? process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434"),
     ollamaGlmOcrModel: getString(payload, "ollamaGlmOcrModel") ?? String(args.flags["ollama-glm-ocr-model"] ?? process.env.OLLAMA_GLM_OCR_MODEL ?? "glm-ocr:latest"),
@@ -141,6 +144,12 @@ function parseEmbeddingProvider(value: string | boolean | undefined): EmbeddingP
   if (value === "openai") return "openai";
   if (value === "hash" || value === undefined || value === false) return "hash";
   throw new Error(`Unsupported embedding provider: ${String(value)}`);
+}
+
+function parsePdfParser(value: string | boolean | undefined): PdfParserName {
+  if (value === "pdftotext") return "pdftotext";
+  if (value === "liteparse" || value === undefined || value === false) return "liteparse";
+  throw new Error(`Unsupported PDF parser: ${String(value)}`);
 }
 
 function parseBackend(value: string | boolean | undefined): SearchBackendName {
@@ -205,6 +214,7 @@ JSON mode:
 Options:
   --embedding      hash by default; openai requires OPENAI_API_KEY in .env.local
   --backend        exact or turbo
+  --pdf-parser     liteparse by default; use pdftotext to skip LiteParse
   --ocr            ollama-glm-ocr by default; use none to skip OCR or vllm-glm-ocr for prod placeholder
   --ocr-mode       text, table, formula, or figure
   --transcription  none by default; cohere-api or vllm-cohere-transcribe
