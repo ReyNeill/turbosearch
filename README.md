@@ -55,15 +55,19 @@ Images and videos are currently indexed only when real text evidence exists as s
 - image sidecars: `image.png.ocr.txt`, `image.png.txt`, or `image.png.md`
 - video sidecars: `video.mp4.transcript.txt`, `video.mp4.ocr.txt`, `video.mp4.txt`, or `video.mp4.md`
 
-When sidecars are missing, extraction reports a pending local-model integration instead of indexing filenames as fake semantic evidence.
+When sidecars are missing, extraction reports a pending local-model integration instead of indexing filenames as fake semantic evidence. Scanned PDF pages fall back to GLM-OCR when `pdftotext` finds little or no embedded text.
 
 Selected/pending local model hooks:
 
 - images: Z.ai GLM-OCR through Ollama for local development
-- video/audio: local transcription model
+- video/audio: Cohere Transcribe 03-2026 through Cohere API for testing, vLLM-compatible provider for private/prod
 - video frames: Z.ai GLM-OCR through Ollama after frame sampling
 - production OCR target: vLLM GLM-OCR provider
 
 GLM-OCR notes live in [docs/glm-ocr.md](docs/glm-ocr.md). Ollama is wired for local image OCR; vLLM is the production target and still needs the exact service contract.
+
+OCR prompt modes are available through `ocrMode`/`--ocr-mode`: `text`, `table`, `formula`, or `figure`. This is a manual routing knob for now, not auto-detection.
+
+Transcription is available through `transcriptionProvider`/`--transcription`: `cohere-api`, `vllm-cohere-transcribe`, or `none`. Video files require `ffmpeg`, which is used to extract WAV audio before transcription.
 
 TurboQuant belongs in the vector backend, not in ingestion. The retrieval quality will mostly come from chunking, multimodal extraction, metadata filters, and reranking.

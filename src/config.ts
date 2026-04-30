@@ -1,6 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EmbeddingProviderName, OcrProviderName, SearchBackendName } from "./types.ts";
+import type {
+  EmbeddingProviderName,
+  OcrMode,
+  OcrProviderName,
+  SearchBackendName,
+  TranscriptionProviderName
+} from "./types.ts";
 
 export type AppConfig = {
   dbPath: string;
@@ -15,9 +21,15 @@ export type AppConfig = {
   ocrProvider: OcrProviderName;
   ollamaBaseUrl: string;
   ollamaGlmOcrModel: string;
+  ocrMode: OcrMode;
   ocrPrompt: string;
   ocrContextTokens: number;
   ocrMaxOutputTokens: number;
+  transcriptionProvider: TranscriptionProviderName;
+  cohereApiKey: string;
+  cohereTranscribeEndpoint: string;
+  cohereTranscribeModel: string;
+  cohereTranscribeLanguage: string;
 };
 
 export function loadEnvLocal(cwd = process.cwd()): void {
@@ -54,11 +66,24 @@ export function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     ocrProvider: parseOcrProvider(process.env.TURBOSEARCH_OCR_PROVIDER),
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434",
     ollamaGlmOcrModel: process.env.OLLAMA_GLM_OCR_MODEL ?? "glm-ocr:latest",
-    ocrPrompt: process.env.TURBOSEARCH_OCR_PROMPT ?? "Text Recognition:",
+    ocrMode: parseOcrMode(process.env.TURBOSEARCH_OCR_MODE),
+    ocrPrompt: process.env.TURBOSEARCH_OCR_PROMPT ?? "",
     ocrContextTokens: Number(process.env.TURBOSEARCH_OCR_CONTEXT_TOKENS ?? 8192),
     ocrMaxOutputTokens: Number(process.env.TURBOSEARCH_OCR_MAX_OUTPUT_TOKENS ?? 2048),
+    transcriptionProvider: parseTranscriptionProvider(process.env.TURBOSEARCH_TRANSCRIPTION_PROVIDER),
+    cohereApiKey: process.env.COHERE_API_KEY ?? "",
+    cohereTranscribeEndpoint: process.env.COHERE_TRANSCRIBE_ENDPOINT ?? "https://api.cohere.com/v2/audio/transcriptions",
+    cohereTranscribeModel: process.env.COHERE_TRANSCRIBE_MODEL ?? "cohere-transcribe-03-2026",
+    cohereTranscribeLanguage: process.env.COHERE_TRANSCRIBE_LANGUAGE ?? "en",
     ...overrides
   };
+}
+
+function parseOcrMode(value: string | undefined): OcrMode {
+  if (value === "table") return "table";
+  if (value === "formula") return "formula";
+  if (value === "figure") return "figure";
+  return "text";
 }
 
 function parseEmbeddingProvider(value: string | undefined): EmbeddingProviderName {
@@ -70,4 +95,11 @@ function parseOcrProvider(value: string | undefined): OcrProviderName {
   if (value === "none") return "none";
   if (value === "vllm-glm-ocr") return "vllm-glm-ocr";
   return "ollama-glm-ocr";
+}
+
+function parseTranscriptionProvider(value: string | undefined): TranscriptionProviderName {
+  if (value === "none") return "none";
+  if (value === "vllm-cohere-transcribe") return "vllm-cohere-transcribe";
+  if (value === "cohere-api") return "cohere-api";
+  return "none";
 }

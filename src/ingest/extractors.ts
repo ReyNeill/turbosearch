@@ -1,5 +1,6 @@
-import { readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { basename, join } from "node:path";
 import type {
   ExtractedDocument,
   ExtractedEvidence,
@@ -7,6 +8,7 @@ import type {
   ExtractionResult
 } from "../types.ts";
 import type { OcrProvider } from "../ocr/provider.ts";
+import type { TranscriptionProvider } from "../transcription/provider.ts";
 import { extensionOf } from "../utils/files.ts";
 
 const textExtensions = new Set([
@@ -40,10 +42,15 @@ const textExtensions = new Set([
 ]);
 
 const imageExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".tiff", ".bmp"]);
+const audioExtensions = new Set([".wav", ".mp3", ".mpeg", ".mpga", ".m4a", ".ogg", ".flac"]);
 const videoExtensions = new Set([".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"]);
 
-export async function extractDocument(path: string, ocrProvider?: OcrProvider | null): Promise<ExtractedDocument | null> {
-  const result = await extractEvidence(path, ocrProvider);
+export async function extractDocument(
+  path: string,
+  ocrProvider?: OcrProvider | null,
+  transcriptionProvider?: TranscriptionProvider | null
+): Promise<ExtractedDocument | null> {
+  const result = await extractEvidence(path, ocrProvider, transcriptionProvider);
   if (result.skipped || result.evidence.length === 0) return null;
 
   return {
@@ -62,7 +69,11 @@ export async function extractDocument(path: string, ocrProvider?: OcrProvider | 
   };
 }
 
-export async function extractEvidence(path: string, ocrProvider?: OcrProvider | null): Promise<ExtractionResult> {
+export async function extractEvidence(
+  path: string,
+  ocrProvider?: OcrProvider | null,
+  transcriptionProvider?: TranscriptionProvider | null
+): Promise<ExtractionResult> {
   const fileStat = await stat(path);
   if (!fileStat.isFile()) {
     throw new Error(`Extraction path is not a file: ${path}`);
@@ -88,41 +99,73 @@ export async function extractEvidence(path: string, ocrProvider?: OcrProvider | 
   }
 
   if (extension === ".pdf") {
+    const pdf = await extractPdfEvidence(path, ocrProvider ?? null);
     return {
       path,
       kind: "pdf",
-      evidence: await extractPdfEvidence(path),
-      pending: [],
+      evidence: pdf.evidence,
+      pending: pdf.pending,
       skipped: false
     };
   }
 
-  if (imageExtensions.has(extension) || videoExtensions.has(extension)) {
-    return extractMediaEvidence(path, imageExtensions.has(extension) ? "image" : "video", ocrProvider ?? null);
+  if (imageExtensions.has(extension)) {
+    return extractMediaEvidence(path, "image", ocrProvider ?? null, transcriptionProvider ?? null);
+  }
+
+  if (audioExtensions.has(extension)) {
+    return extractMediaEvidence(path, "audio", ocrProvider ?? null, transcriptionProvider ?? null);
+  }
+
+  if (videoExtensions.has(extension)) {
+    return extractMediaEvidence(path, "video", ocrProvider ?? null, transcriptionProvider ?? null);
   }
 
   return { path, kind: "binary", evidence: [], pending: [], skipped: true };
 }
 
-async function extractPdfEvidence(path: string): Promise<ExtractedEvidence[]> {
+async function extractPdfEvidence(
+  path: string,
+  ocrProvider: OcrProvider | null
+): Promise<{ evidence: ExtractedEvidence[]; pending: ExtractionPending[] }> {
   const pageCount = await getPdfPageCount(path);
   if (pageCount === null) {
     const result = await runCommand("pdftotext", ["-layout", path, "-"]);
+    if (result.exitCode !== 0 || isSparsePdfText(result.stdout)) {
+      if (!ocrProvider) {
+        return {
+          evidence: [],
+          pending: [createPdfOcrPending(path, undefined, "PDF has no extractable text and OCR is disabled.")]
+        };
+      }
+
+      try {
+        const imagePath = await renderPdfPage(path, 1);
+        const ocr = await ocrProvider.extractText({ imagePath, mode: "text" });
+        return {
+          evidence: [pdfOcrEvidence(path, 1, ocr.text, ocr.provider, ocr.model)],
+          pending: []
+        };
+      } catch (error) {
+        return {
+          evidence: [],
+          pending: [createPdfOcrPending(path, undefined, error)]
+        };
+      }
+    }
+
     if (result.exitCode !== 0) {
       throw new Error(`Failed to extract PDF text from ${path}. Install poppler/pdftotext.`);
     }
 
-    return [{
-      sourcePath: path,
-      sourceKind: "pdf",
-      modality: "pdf_text",
-      text: result.stdout,
-      locator: {},
-      metadata: { extension: ".pdf", extractor: "pdftotext" }
-    }];
+    return {
+      evidence: [pdfTextEvidence(path, undefined, result.stdout)],
+      pending: []
+    };
   }
 
   const evidence: ExtractedEvidence[] = [];
+  const pending: ExtractionPending[] = [];
 
   for (let page = 1; page <= pageCount; page += 1) {
     const result = await runCommand("pdftotext", ["-f", String(page), "-l", String(page), "-layout", path, "-"]);
@@ -131,19 +174,26 @@ async function extractPdfEvidence(path: string): Promise<ExtractedEvidence[]> {
     }
 
     const text = result.stdout.trim();
-    if (!text) continue;
+    if (!isSparsePdfText(text)) {
+      evidence.push(pdfTextEvidence(path, page, text));
+      continue;
+    }
 
-    evidence.push({
-      sourcePath: path,
-      sourceKind: "pdf",
-      modality: "pdf_text",
-      text,
-      locator: { page },
-      metadata: { extension: ".pdf", extractor: "pdftotext" }
-    });
+    if (!ocrProvider) {
+      pending.push(createPdfOcrPending(path, page, "PDF page has little/no extractable text and OCR is disabled."));
+      continue;
+    }
+
+    try {
+      const imagePath = await renderPdfPage(path, page);
+      const ocr = await ocrProvider.extractText({ imagePath, mode: "text" });
+      evidence.push(pdfOcrEvidence(path, page, ocr.text, ocr.provider, ocr.model));
+    } catch (error) {
+      pending.push(createPdfOcrPending(path, page, error));
+    }
   }
 
-  return evidence;
+  return { evidence, pending };
 }
 
 async function getPdfPageCount(path: string): Promise<number | null> {
@@ -154,10 +204,15 @@ async function getPdfPageCount(path: string): Promise<number | null> {
   return match ? Number(match[1]) : null;
 }
 
-async function extractMediaEvidence(path: string, kind: "image" | "video", ocrProvider: OcrProvider | null): Promise<ExtractionResult> {
+async function extractMediaEvidence(
+  path: string,
+  kind: "image" | "audio" | "video",
+  ocrProvider: OcrProvider | null,
+  transcriptionProvider: TranscriptionProvider | null
+): Promise<ExtractionResult> {
   const sidecar = await readFirstExisting(kind === "image"
     ? [`${path}.ocr.txt`, `${path}.txt`, `${path}.md`]
-    : [`${path}.transcript.txt`, `${path}.ocr.txt`, `${path}.txt`, `${path}.md`]);
+    : [`${path}.transcript.txt`, `${path}.txt`, `${path}.md`]);
 
   const pending: ExtractionPending[] = [];
   if (kind === "image" && ocrProvider) {
@@ -184,8 +239,36 @@ async function extractMediaEvidence(path: string, kind: "image" | "video", ocrPr
     } catch (error) {
       pending.push(createPendingExtraction(path, kind, error));
     }
-  } else if (kind === "video") {
-    pending.push(createPendingExtraction(path, kind));
+  } else if (kind === "audio" || kind === "video") {
+    if (transcriptionProvider) {
+      try {
+        const audioPath = kind === "audio" ? path : await extractAudioForTranscription(path);
+        const transcript = await transcriptionProvider.transcribe({ audioPath });
+        return {
+          path,
+          kind,
+          evidence: [{
+            sourcePath: path,
+            sourceKind: kind,
+            modality: kind === "audio" ? "audio_transcript" : "video_transcript",
+            text: transcript.text,
+            locator: {},
+            metadata: {
+              extension: extensionOf(path),
+              extractor: transcript.provider,
+              model: transcript.model,
+              language: transcript.language
+            }
+          }],
+          pending,
+          skipped: false
+        };
+      } catch (error) {
+        pending.push(createTranscriptionPending(path, kind, error));
+      }
+    } else {
+      pending.push(createTranscriptionPending(path, kind));
+    }
   }
 
   if (!sidecar) {
@@ -204,18 +287,24 @@ async function extractMediaEvidence(path: string, kind: "image" | "video", ocrPr
     evidence: [{
       sourcePath: path,
       sourceKind: kind,
-      modality: kind === "image" ? "image_ocr" : "video_transcript",
+      modality: sidecarModality(kind),
       text: sidecar,
       locator: {},
       metadata: {
         extension: extensionOf(path),
         extractor: "sidecar",
-        localModelExtractor: kind === "image" ? "glm-ocr-fallback" : "pending"
+        localModelExtractor: kind === "image" ? "glm-ocr-fallback" : "transcription-fallback"
       }
     }],
     pending,
     skipped: false
   };
+}
+
+function sidecarModality(kind: "image" | "audio" | "video"): ExtractedEvidence["modality"] {
+  if (kind === "image") return "image_ocr";
+  if (kind === "audio") return "audio_transcript";
+  return "video_transcript";
 }
 
 function createPendingExtraction(path: string, kind: "image" | "video", error?: unknown): ExtractionPending {
@@ -230,13 +319,109 @@ function createPendingExtraction(path: string, kind: "image" | "video", error?: 
     };
   }
 
+  return createTranscriptionPending(path, kind);
+}
+
+function createTranscriptionPending(path: string, kind: "audio" | "video", error?: unknown): ExtractionPending {
+  const detail = error instanceof Error ? ` ${error.message}` : "";
   return {
     sourcePath: path,
     sourceKind: kind,
     pending: true,
-    reason: "Video/audio transcription local model is not configured yet.",
-    requiredExtractor: "local-transcription-model"
+    reason: `Video/audio transcription with Cohere Transcribe is pending.${detail}`,
+    requiredExtractor: "cohere-api"
   };
+}
+
+function pdfTextEvidence(path: string, page: number | undefined, text: string): ExtractedEvidence {
+  return {
+    sourcePath: path,
+    sourceKind: "pdf",
+    modality: "pdf_text",
+    text,
+    locator: page ? { page } : {},
+    metadata: { extension: ".pdf", extractor: "pdftotext" }
+  };
+}
+
+function pdfOcrEvidence(path: string, page: number, text: string, extractor: string, model: string): ExtractedEvidence {
+  return {
+    sourcePath: path,
+    sourceKind: "pdf",
+    modality: "pdf_ocr",
+    text,
+    locator: { page },
+    metadata: { extension: ".pdf", extractor, model }
+  };
+}
+
+function createPdfOcrPending(path: string, page: number | undefined, error: unknown): ExtractionPending {
+  const detail = error instanceof Error ? error.message : String(error);
+  return {
+    sourcePath: path,
+    sourceKind: "pdf",
+    pending: true,
+    reason: `PDF OCR is pending${page ? ` for page ${page}` : ""}. ${detail}`,
+    requiredExtractor: "ollama-glm-ocr"
+  };
+}
+
+function isSparsePdfText(text: string): boolean {
+  const normalized = text.replace(/\s+/g, "");
+  return normalized.length < 40;
+}
+
+async function renderPdfPage(path: string, page: number): Promise<string> {
+  const directory = ".turbosearch/pdf-ocr-pages";
+  await mkdir(directory, { recursive: true });
+
+  const safeName = basename(path).replace(/[^a-zA-Z0-9._-]/g, "_");
+  const prefix = join(directory, `${safeName}-page-${page}`);
+  const result = await runCommand("pdftoppm", [
+    "-r",
+    "150",
+    "-f",
+    String(page),
+    "-l",
+    String(page),
+    "-singlefile",
+    "-png",
+    path,
+    prefix
+  ]);
+
+  if (result.exitCode !== 0) {
+    throw new Error(`Failed to render PDF page ${page}: ${result.stderr || result.stdout}`);
+  }
+
+  return `${prefix}.png`;
+}
+
+async function extractAudioForTranscription(path: string): Promise<string> {
+  const directory = ".turbosearch/audio";
+  await mkdir(directory, { recursive: true });
+
+  const safeName = basename(path).replace(/[^a-zA-Z0-9._-]/g, "_");
+  const outputPath = join(directory, `${safeName}.wav`);
+  const result = await runCommand("ffmpeg", [
+    "-y",
+    "-i",
+    path,
+    "-vn",
+    "-ac",
+    "1",
+    "-ar",
+    "16000",
+    "-c:a",
+    "pcm_s16le",
+    outputPath
+  ]);
+
+  if (result.exitCode !== 0) {
+    throw new Error(`Failed to extract audio with ffmpeg: ${result.stderr || result.stdout}`);
+  }
+
+  return outputPath;
 }
 
 export async function extractPdfText(path: string): Promise<string> {

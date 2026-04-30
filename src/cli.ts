@@ -4,6 +4,7 @@ import { createEmbeddingProvider } from "./embeddings/provider.ts";
 import { extractEvidence } from "./ingest/extractors.ts";
 import { createOcrProvider } from "./ocr/provider.ts";
 import { SearchEngine } from "./search/search-engine.ts";
+import { createTranscriptionProvider } from "./transcription/provider.ts";
 import type { EmbeddingProviderName, SearchBackendName } from "./types.ts";
 
 type ParsedArgs = {
@@ -84,9 +85,10 @@ async function runExtract(args: ParsedArgs, payload: JsonPayload, config: AppCon
   if (paths.length === 0) throw new Error("extract requires a path or paths.");
 
   const ocrProvider = createOcrProvider(config);
+  const transcriptionProvider = createTranscriptionProvider(config);
   const results = [];
   for (const path of paths) {
-    results.push(await extractEvidence(path, ocrProvider));
+    results.push(await extractEvidence(path, ocrProvider, transcriptionProvider));
   }
 
   writeJson({ ok: true, command: "extract", results });
@@ -99,12 +101,33 @@ function configFromArgs(args: ParsedArgs, payload: JsonPayload): AppConfig {
     ocrProvider: parseOcrProvider(getValue(args.flags.ocr, payload.ocrProvider)),
     ollamaBaseUrl: getString(payload, "ollamaBaseUrl") ?? String(args.flags["ollama-base-url"] ?? process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434"),
     ollamaGlmOcrModel: getString(payload, "ollamaGlmOcrModel") ?? String(args.flags["ollama-glm-ocr-model"] ?? process.env.OLLAMA_GLM_OCR_MODEL ?? "glm-ocr:latest"),
+    ocrMode: parseOcrMode(getValue(args.flags["ocr-mode"], payload.ocrMode)),
     ocrPrompt: getString(payload, "ocrPrompt") ?? String(args.flags["ocr-prompt"] ?? process.env.TURBOSEARCH_OCR_PROMPT ?? "Text Recognition:"),
     ocrContextTokens: getNumber(payload, "ocrContextTokens") ?? Number(args.flags["ocr-context-tokens"] ?? process.env.TURBOSEARCH_OCR_CONTEXT_TOKENS ?? 8192),
     ocrMaxOutputTokens: getNumber(payload, "ocrMaxOutputTokens") ?? Number(args.flags["ocr-max-output-tokens"] ?? process.env.TURBOSEARCH_OCR_MAX_OUTPUT_TOKENS ?? 2048),
+    transcriptionProvider: parseTranscriptionProvider(getValue(args.flags.transcription, payload.transcriptionProvider) ?? process.env.TURBOSEARCH_TRANSCRIPTION_PROVIDER),
+    cohereApiKey: getString(payload, "cohereApiKey") ?? process.env.COHERE_API_KEY ?? "",
+    cohereTranscribeEndpoint: getString(payload, "cohereTranscribeEndpoint") ?? String(args.flags["cohere-transcribe-endpoint"] ?? process.env.COHERE_TRANSCRIBE_ENDPOINT ?? "https://api.cohere.com/v2/audio/transcriptions"),
+    cohereTranscribeModel: getString(payload, "cohereTranscribeModel") ?? String(args.flags["cohere-transcribe-model"] ?? process.env.COHERE_TRANSCRIBE_MODEL ?? "cohere-transcribe-03-2026"),
+    cohereTranscribeLanguage: getString(payload, "cohereTranscribeLanguage") ?? String(args.flags["cohere-transcribe-language"] ?? process.env.COHERE_TRANSCRIBE_LANGUAGE ?? "en"),
     turboBits: getNumber(payload, "turboBits") ?? Number(args.flags["turbo-bits"] ?? process.env.TURBOSEARCH_TURBO_BITS ?? 4),
     turboRerankLimit: getNumber(payload, "turboRerank") ?? Number(args.flags["turbo-rerank"] ?? process.env.TURBOSEARCH_TURBO_RERANK_LIMIT ?? 80)
   });
+}
+
+function parseTranscriptionProvider(value: string | boolean | undefined): AppConfig["transcriptionProvider"] {
+  if (value === "cohere-api") return "cohere-api";
+  if (value === "vllm-cohere-transcribe") return "vllm-cohere-transcribe";
+  if (value === "none" || value === undefined || value === false) return "none";
+  throw new Error(`Unsupported transcription provider: ${String(value)}`);
+}
+
+function parseOcrMode(value: string | boolean | undefined): AppConfig["ocrMode"] {
+  if (value === "table") return "table";
+  if (value === "formula") return "formula";
+  if (value === "figure") return "figure";
+  if (value === "text" || value === undefined || value === false) return "text";
+  throw new Error(`Unsupported OCR mode: ${String(value)}`);
 }
 
 function parseOcrProvider(value: string | boolean | undefined): AppConfig["ocrProvider"] {
@@ -183,6 +206,8 @@ Options:
   --embedding      hash by default; openai requires OPENAI_API_KEY in .env.local
   --backend        exact or turbo
   --ocr            ollama-glm-ocr by default; use none to skip OCR or vllm-glm-ocr for prod placeholder
+  --ocr-mode       text, table, formula, or figure
+  --transcription  none by default; cohere-api or vllm-cohere-transcribe
   --ollama-base-url
                    Ollama base URL, default http://127.0.0.1:11434
   --json           read a JSON request from the next argument, or stdin when no value is provided

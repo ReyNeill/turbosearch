@@ -41,7 +41,8 @@ TurboSearch env:
 TURBOSEARCH_OCR_PROVIDER=ollama-glm-ocr
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_GLM_OCR_MODEL=glm-ocr:latest
-TURBOSEARCH_OCR_PROMPT=Text Recognition:
+TURBOSEARCH_OCR_MODE=text
+TURBOSEARCH_OCR_PROMPT=
 TURBOSEARCH_OCR_CONTEXT_TOKENS=8192
 TURBOSEARCH_OCR_MAX_OUTPUT_TOKENS=2048
 ```
@@ -88,6 +89,15 @@ The model card lists document parsing prompts such as:
 - `Table Recognition:`
 
 For the first integration, use `Text Recognition:` as the default. Add table/formula routing later if extraction quality demands it.
+
+TurboSearch now exposes these modes explicitly:
+
+- `text` -> `Text Recognition:`
+- `table` -> `Table Recognition:`
+- `formula` -> `Formula Recognition:`
+- `figure` -> `Figure Recognition:`
+
+Set `TURBOSEARCH_OCR_MODE=table` or pass JSON like `{"ocrMode":"table"}` for known table-heavy inputs. A custom `ocrPrompt` overrides the mode prompt.
 
 ## Production vLLM Plan
 

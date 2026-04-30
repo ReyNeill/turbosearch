@@ -4,6 +4,7 @@ import type { EmbeddingProvider } from "../embeddings/provider.ts";
 import { extractEvidence } from "../ingest/extractors.ts";
 import { createOcrProvider, type OcrProvider } from "../ocr/provider.ts";
 import { SearchDatabase } from "../storage/database.ts";
+import { createTranscriptionProvider, type TranscriptionProvider } from "../transcription/provider.ts";
 import type {
   ExtractedDocument,
   ExtractedEvidence,
@@ -22,6 +23,7 @@ export class SearchEngine {
   private readonly database: SearchDatabase;
   private readonly turbo: TurboQuantCodec;
   private readonly ocrProvider: OcrProvider | null;
+  private readonly transcriptionProvider: TranscriptionProvider | null;
 
   constructor(
     private readonly config: AppConfig,
@@ -33,6 +35,7 @@ export class SearchEngine {
       bits: config.turboBits
     });
     this.ocrProvider = createOcrProvider(config);
+    this.transcriptionProvider = createTranscriptionProvider(config);
   }
 
   close(): void {
@@ -45,7 +48,7 @@ export class SearchEngine {
 
     for (const file of files) {
       onEvent?.({ type: "document_started", path: file });
-      const extraction = await extractEvidence(file, this.ocrProvider);
+      const extraction = await extractEvidence(file, this.ocrProvider, this.transcriptionProvider);
       summary.pendingExtractions += extraction.pending.length;
       for (const pending of extraction.pending) {
         onEvent?.({
