@@ -11,6 +11,7 @@ bun install
 bun run src/cli.ts ingest docs
 bun run src/cli.ts search "TurboQuant semantic search" --backend exact
 bun run src/cli.ts search "TurboQuant semantic search" --backend turbo
+bun run src/cli.ts search "TurboQuant semantic search" --backend hybrid
 ```
 
 By default this uses local hash embeddings, which are private and deterministic but not high-quality semantic embeddings. For real semantic search, copy `.env.local.example` to `.env.local`, set `OPENAI_API_KEY`, and ingest with:
@@ -28,8 +29,11 @@ bun run src/cli.ts search "contract renewal terms" --embedding openai
 - Audio/video transcription through Cohere Transcribe or a vLLM-compatible endpoint.
 - Video frame OCR with fixed-interval frame sampling and GLM-OCR.
 - SQLite chunk store with source metadata.
+- SQLite FTS5 BM25 lexical search.
 - Exact cosine search.
 - Compressed TurboQuant-style candidate search with exact reranking.
+- Hybrid vector + BM25 search with reciprocal-rank fusion.
+- Optional Postgres storage mode for production corpora, with psql_bm25s-backed BM25.
 - CLI JSON mode for agent calls.
 - JSON Lines ingestion events for streaming progress.
 
@@ -101,3 +105,28 @@ TURBOSEARCH_VIDEO_FRAME_OCR_MAX_FRAMES=60
 ```
 
 TurboQuant belongs in the vector backend, not in ingestion. The retrieval quality will mostly come from chunking, multimodal extraction, metadata filters, and reranking.
+
+## Storage And Retrieval Backends
+
+SQLite is the default storage backend because it keeps TurboSearch plug-and-play:
+
+```bash
+bun run src/cli.ts ingest ./client-data --storage sqlite
+bun run src/cli.ts search "contract renewal terms" --backend hybrid
+```
+
+Postgres is available for production/shared corpora. It expects PostgreSQL 18 with the `psql_bm25s` extension installed or available to `CREATE EXTENSION`:
+
+```bash
+TURBOSEARCH_STORAGE=postgres
+TURBOSEARCH_POSTGRES_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres
+bun run src/cli.ts ingest ./client-data --storage postgres
+bun run src/cli.ts search "contract renewal terms" --storage postgres --backend bm25
+```
+
+Retrieval backends:
+
+- `exact`: exact cosine over stored embeddings.
+- `turbo`: TurboQuant candidate search with exact reranking.
+- `bm25`: lexical BM25 over chunk text.
+- `hybrid`: vector + BM25 reciprocal-rank fusion.

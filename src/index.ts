@@ -5,5 +5,6 @@ export type {
   EmbeddingProviderName,
   IngestSummary,
   SearchBackendName,
+  StorageProviderName,
   SearchResult
 } from "./types.ts";

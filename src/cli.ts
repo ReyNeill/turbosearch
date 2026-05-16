@@ -5,7 +5,7 @@ import { extractEvidence } from "./ingest/extractors.ts";
 import { createOcrProvider } from "./ocr/provider.ts";
 import { SearchEngine } from "./search/search-engine.ts";
 import { createTranscriptionProvider } from "./transcription/provider.ts";
-import type { EmbeddingProviderName, PdfParserName, SearchBackendName } from "./types.ts";
+import type { EmbeddingProviderName, PdfParserName, SearchBackendName, StorageProviderName } from "./types.ts";
 
 type ParsedArgs = {
   command: string | undefined;
@@ -47,14 +47,14 @@ async function main(): Promise<void> {
     }
 
     if (command === "stats") {
-      const stats = engine.stats();
+      const stats = await engine.stats();
       writeJson({ ok: true, command: "stats", stats });
       return;
     }
 
     throw new Error(`Unknown command: ${command}`);
   } finally {
-    engine.close();
+    await engine.close();
   }
 }
 
@@ -102,7 +102,10 @@ async function runExtract(args: ParsedArgs, payload: JsonPayload, config: AppCon
 
 function configFromArgs(args: ParsedArgs, payload: JsonPayload): AppConfig {
   return createConfig({
+    storageProvider: parseStorageProvider(getValue(args.flags.storage, payload.storage) ?? process.env.TURBOSEARCH_STORAGE),
     dbPath: getString(payload, "db") ?? String(args.flags.db ?? ".turbosearch/index.sqlite"),
+    postgresUrl: getString(payload, "postgresUrl") ?? String(args.flags["postgres-url"] ?? process.env.TURBOSEARCH_POSTGRES_URL ?? ""),
+    postgresUsePsqlBm25s: parseBoolean(getValue(args.flags["postgres-psql-bm25s"], payload.postgresPsqlBm25s) ?? process.env.TURBOSEARCH_POSTGRES_PSQL_BM25S, true),
     embeddingProvider: parseEmbeddingProvider(getValue(args.flags.embedding, payload.embedding)),
     pdfParser: parsePdfParser(
       getValue(args.flags["pdf-parser"], payload.pdfParser) ?? process.env.TURBOSEARCH_PDF_PARSER
@@ -129,6 +132,12 @@ function configFromArgs(args: ParsedArgs, payload: JsonPayload): AppConfig {
     turboBits: getNumber(payload, "turboBits") ?? Number(args.flags["turbo-bits"] ?? process.env.TURBOSEARCH_TURBO_BITS ?? 4),
     turboRerankLimit: getNumber(payload, "turboRerank") ?? Number(args.flags["turbo-rerank"] ?? process.env.TURBOSEARCH_TURBO_RERANK_LIMIT ?? 80)
   });
+}
+
+function parseStorageProvider(value: string | boolean | undefined): StorageProviderName {
+  if (value === "postgres") return "postgres";
+  if (value === "sqlite" || value === undefined || value === false) return "sqlite";
+  throw new Error(`Unsupported storage provider: ${String(value)}`);
 }
 
 function parseTranscriptionProvider(value: string | boolean | undefined): AppConfig["transcriptionProvider"] {
@@ -166,6 +175,8 @@ function parsePdfParser(value: string | boolean | undefined): PdfParserName {
 }
 
 function parseBackend(value: string | boolean | undefined): SearchBackendName {
+  if (value === "hybrid") return "hybrid";
+  if (value === "bm25") return "bm25";
   if (value === "turbo") return "turbo";
   if (value === "exact" || value === undefined || value === false) return "exact";
   throw new Error(`Unsupported backend: ${String(value)}`);
@@ -221,8 +232,8 @@ function printHelp(): void {
   console.log(`TurboSearch
 
 Usage:
-  bun run src/cli.ts ingest <file-or-directory...> [--db path] [--embedding hash|openai]
-  bun run src/cli.ts search <query> [--backend exact|turbo] [--k 10] [--db path]
+  bun run src/cli.ts ingest <file-or-directory...> [--storage sqlite|postgres] [--db path] [--embedding hash|openai]
+  bun run src/cli.ts search <query> [--backend exact|turbo|bm25|hybrid] [--k 10] [--storage sqlite|postgres]
   bun run src/cli.ts extract <file> [--json]
   bun run src/cli.ts stats [--db path]
 
@@ -234,7 +245,11 @@ JSON mode:
 
 Options:
   --embedding      hash by default; openai requires OPENAI_API_KEY in .env.local
-  --backend        exact or turbo
+  --storage        sqlite by default; postgres requires TURBOSEARCH_POSTGRES_URL
+  --postgres-url   Postgres connection URL for --storage postgres
+  --postgres-psql-bm25s
+                   true by default; creates/uses psql_bm25s for Postgres BM25
+  --backend        exact, turbo, bm25, or hybrid
   --pdf-parser     liteparse by default; use pdftotext to skip LiteParse
   --ocr            ollama-glm-ocr by default; use none to skip OCR or vllm-glm-ocr for prod placeholder
   --ocr-mode       text, table, formula, or figure

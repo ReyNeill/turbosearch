@@ -3,7 +3,8 @@ import { chunkDocument } from "../chunking/chunker.ts";
 import type { EmbeddingProvider } from "../embeddings/provider.ts";
 import { extractEvidence } from "../ingest/extractors.ts";
 import { createOcrProvider, type OcrProvider } from "../ocr/provider.ts";
-import { SearchDatabase } from "../storage/database.ts";
+import { createSearchStorage, type SearchStorage } from "../storage/database.ts";
+import type { LexicalSearchResult } from "../storage/types.ts";
 import { createTranscriptionProvider, type TranscriptionProvider } from "../transcription/provider.ts";
 import type {
   ExtractedDocument,
@@ -20,7 +21,7 @@ import { cosine } from "../vector/math.ts";
 import { TurboQuantCodec } from "../vector/turboquant/index.ts";
 
 export class SearchEngine {
-  private readonly database: SearchDatabase;
+  private readonly database: SearchStorage;
   private readonly turbo: TurboQuantCodec;
   private readonly ocrProvider: OcrProvider | null;
   private readonly transcriptionProvider: TranscriptionProvider | null;
@@ -29,7 +30,7 @@ export class SearchEngine {
     private readonly config: AppConfig,
     private readonly embeddings: EmbeddingProvider
   ) {
-    this.database = new SearchDatabase(config.dbPath);
+    this.database = createSearchStorage(config);
     this.turbo = new TurboQuantCodec({
       dimension: embeddings.dimensions,
       bits: config.turboBits
@@ -38,8 +39,8 @@ export class SearchEngine {
     this.transcriptionProvider = createTranscriptionProvider(config);
   }
 
-  close(): void {
-    this.database.close();
+  async close(): Promise<void> {
+    await this.database.close();
   }
 
   async ingestPaths(paths: string[], onEvent?: (event: IngestEvent) => void): Promise<IngestSummary> {
@@ -94,7 +95,7 @@ export class SearchEngine {
 
       const vectors = await this.embeddings.embedTexts(chunks.map((chunk) => chunk.text));
       const turboVectors = vectors.map((vector) => this.turbo.encode(vector));
-      this.database.replaceDocument(document, chunks, vectors, turboVectors);
+      await this.database.replaceDocument(document, chunks, vectors, turboVectors);
 
       summary.documents += 1;
       summary.chunks += chunks.length;
@@ -108,9 +109,22 @@ export class SearchEngine {
   async search(query: string, options: { backend?: SearchBackendName; k?: number } = {}): Promise<SearchResult[]> {
     const backend = options.backend ?? this.config.defaultBackend;
     const k = options.k ?? 10;
-    const queryVector = await this.embeddings.embedText(query);
-    const chunks = this.database.getAllChunks();
 
+    if (backend === "bm25") {
+      return (await this.database.searchLexical(query, k)).map(({ chunk, score }) => toSearchResult(chunk, score));
+    }
+
+    const queryVector = await this.embeddings.embedText(query);
+
+    if (backend === "hybrid") {
+      const [chunks, lexicalResults] = await Promise.all([
+        this.database.getAllChunks(),
+        this.database.searchLexical(query, Math.max(k, this.config.turboRerankLimit))
+      ]);
+      return this.searchHybrid(queryVector, chunks, lexicalResults, k);
+    }
+
+    const chunks = await this.database.getAllChunks();
     if (backend === "turbo") {
       return this.searchTurbo(queryVector, chunks, k);
     }
@@ -118,7 +132,7 @@ export class SearchEngine {
     return this.searchExact(queryVector, chunks, k);
   }
 
-  stats(): { documents: number; chunks: number } {
+  async stats(): Promise<{ documents: number; chunks: number }> {
     return this.database.getStats();
   }
 
@@ -149,6 +163,54 @@ export class SearchEngine {
       .sort((a, b) => b.score - a.score)
       .slice(0, k)
       .map(({ chunk, score }) => toSearchResult(chunk, score));
+  }
+
+  private searchHybrid(
+    queryVector: Float32Array,
+    chunks: StoredChunk[],
+    lexicalResults: LexicalSearchResult[],
+    k: number
+  ): SearchResult[] {
+    const vectorRanked = this.searchExactCandidates(queryVector, chunks, Math.max(k, this.config.turboRerankLimit));
+    const scores = new Map<number, { chunk: StoredChunk; score: number }>();
+
+    addReciprocalRankScores(scores, vectorRanked.map(({ chunk }) => chunk), 0.55);
+    addReciprocalRankScores(scores, lexicalResults.map(({ chunk }) => chunk), 0.45);
+
+    return Array.from(scores.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, k)
+      .map(({ chunk, score }) => toSearchResult(chunk, score));
+  }
+
+  private searchExactCandidates(
+    queryVector: Float32Array,
+    chunks: StoredChunk[],
+    limit: number
+  ): Array<{ chunk: StoredChunk; score: number }> {
+    return chunks
+      .map((chunk) => ({ chunk, score: cosine(queryVector, chunk.embedding) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+  }
+}
+
+function addReciprocalRankScores(
+  scores: Map<number, { chunk: StoredChunk; score: number }>,
+  rankedChunks: StoredChunk[],
+  weight: number
+): void {
+  const rankConstant = 60;
+  for (let index = 0; index < rankedChunks.length; index += 1) {
+    const chunk = rankedChunks[index];
+    if (!chunk) continue;
+
+    const existing = scores.get(chunk.id);
+    const score = weight / (rankConstant + index + 1);
+    scores.set(chunk.id, {
+      chunk,
+      score: (existing?.score ?? 0) + score
+    });
   }
 }
 

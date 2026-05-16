@@ -1,5 +1,6 @@
 export type EmbeddingProviderName = "hash" | "openai";
-export type SearchBackendName = "exact" | "turbo";
+export type StorageProviderName = "sqlite" | "postgres";
+export type SearchBackendName = "exact" | "turbo" | "bm25" | "hybrid";
 export type OcrProviderName = "none" | "ollama-glm-ocr" | "vllm-glm-ocr";
 export type OcrMode = "text" | "table" | "formula" | "figure";
 export type TranscriptionProviderName = "none" | "cohere-api" | "vllm-cohere-transcribe";

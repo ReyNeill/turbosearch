@@ -6,11 +6,15 @@ import type {
   OcrProviderName,
   PdfParserName,
   SearchBackendName,
+  StorageProviderName,
   TranscriptionProviderName
 } from "./types.ts";
 
 export type AppConfig = {
+  storageProvider: StorageProviderName;
   dbPath: string;
+  postgresUrl: string;
+  postgresUsePsqlBm25s: boolean;
   embeddingProvider: EmbeddingProviderName;
   openAiEmbeddingModel: string;
   embeddingDimensions: number;
@@ -63,7 +67,10 @@ export function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   loadEnvLocal();
 
   return {
+    storageProvider: parseStorageProvider(process.env.TURBOSEARCH_STORAGE),
     dbPath: ".turbosearch/index.sqlite",
+    postgresUrl: process.env.TURBOSEARCH_POSTGRES_URL ?? "",
+    postgresUsePsqlBm25s: parseBoolean(process.env.TURBOSEARCH_POSTGRES_PSQL_BM25S, true),
     embeddingProvider: parseEmbeddingProvider(process.env.TURBOSEARCH_EMBEDDING_PROVIDER),
     openAiEmbeddingModel: process.env.TURBOSEARCH_OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small",
     embeddingDimensions: Number(process.env.TURBOSEARCH_EMBEDDING_DIMENSIONS ?? 1536),
@@ -94,6 +101,11 @@ export function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     videoFrameOcrMaxFrames: Number(process.env.TURBOSEARCH_VIDEO_FRAME_OCR_MAX_FRAMES ?? 60),
     ...overrides
   };
+}
+
+function parseStorageProvider(value: string | undefined): StorageProviderName {
+  if (value === "postgres") return "postgres";
+  return "sqlite";
 }
 
 function parseOcrMode(value: string | undefined): OcrMode {
