@@ -106,6 +106,8 @@ function configFromArgs(args: ParsedArgs, payload: JsonPayload): AppConfig {
     dbPath: getString(payload, "db") ?? String(args.flags.db ?? ".turbosearch/index.sqlite"),
     postgresUrl: getString(payload, "postgresUrl") ?? String(args.flags["postgres-url"] ?? process.env.TURBOSEARCH_POSTGRES_URL ?? ""),
     postgresUsePsqlBm25s: parseBoolean(getValue(args.flags["postgres-psql-bm25s"], payload.postgresPsqlBm25s) ?? process.env.TURBOSEARCH_POSTGRES_PSQL_BM25S, true),
+    postgresUsePgvector: parseBoolean(getValue(args.flags["postgres-pgvector"], payload.postgresPgvector) ?? process.env.TURBOSEARCH_POSTGRES_PGVECTOR, true),
+    postgresVectorIndex: parseBoolean(getValue(args.flags["postgres-vector-index"], payload.postgresVectorIndex) ?? process.env.TURBOSEARCH_POSTGRES_VECTOR_INDEX, true),
     embeddingProvider: parseEmbeddingProvider(getValue(args.flags.embedding, payload.embedding)),
     pdfParser: parsePdfParser(
       getValue(args.flags["pdf-parser"], payload.pdfParser) ?? process.env.TURBOSEARCH_PDF_PARSER
@@ -249,6 +251,10 @@ Options:
   --postgres-url   Postgres connection URL for --storage postgres
   --postgres-psql-bm25s
                    true by default; creates/uses psql_bm25s for Postgres BM25
+  --postgres-pgvector
+                   true by default; creates/uses pgvector for Postgres vector search
+  --postgres-vector-index
+                   true by default; creates an HNSW cosine index for pgvector
   --backend        exact, turbo, bm25, or hybrid
   --pdf-parser     liteparse by default; use pdftotext to skip LiteParse
   --ocr            ollama-glm-ocr by default; use none to skip OCR or vllm-glm-ocr for prod placeholder

@@ -117,11 +117,24 @@ export class SearchEngine {
     const queryVector = await this.embeddings.embedText(query);
 
     if (backend === "hybrid") {
+      if (this.database.searchHybrid) {
+        return (await this.database.searchHybrid(
+          query,
+          queryVector,
+          k,
+          Math.max(k, this.config.turboRerankLimit)
+        )).map(({ chunk, score }) => toSearchResult(chunk, score));
+      }
+
       const [chunks, lexicalResults] = await Promise.all([
         this.database.getAllChunks(),
         this.database.searchLexical(query, Math.max(k, this.config.turboRerankLimit))
       ]);
       return this.searchHybrid(queryVector, chunks, lexicalResults, k);
+    }
+
+    if (backend === "exact" && this.database.searchVector) {
+      return (await this.database.searchVector(queryVector, k)).map(({ chunk, score }) => toSearchResult(chunk, score));
     }
 
     const chunks = await this.database.getAllChunks();

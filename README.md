@@ -33,7 +33,7 @@ bun run src/cli.ts search "contract renewal terms" --embedding openai
 - Exact cosine search.
 - Compressed TurboQuant-style candidate search with exact reranking.
 - Hybrid vector + BM25 search with reciprocal-rank fusion.
-- Optional Postgres storage mode for production corpora, with psql_bm25s-backed BM25.
+- Optional Postgres storage mode for production corpora, with pgvector-backed vector search and psql_bm25s-backed BM25/hybrid fusion.
 - CLI JSON mode for agent calls.
 - JSON Lines ingestion events for streaming progress.
 
@@ -115,14 +115,28 @@ bun run src/cli.ts ingest ./client-data --storage sqlite
 bun run src/cli.ts search "contract renewal terms" --backend hybrid
 ```
 
-Postgres is available for production/shared corpora. It expects PostgreSQL 18 with the `psql_bm25s` extension installed or available to `CREATE EXTENSION`:
+Postgres is available for production/shared corpora. It expects PostgreSQL 18 with `pgvector` and `psql_bm25s` installed or available to `CREATE EXTENSION`:
 
 ```bash
 TURBOSEARCH_STORAGE=postgres
 TURBOSEARCH_POSTGRES_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres
+TURBOSEARCH_POSTGRES_PGVECTOR=true
+TURBOSEARCH_POSTGRES_PSQL_BM25S=true
 bun run src/cli.ts ingest ./client-data --storage postgres
-bun run src/cli.ts search "contract renewal terms" --storage postgres --backend bm25
+bun run src/cli.ts search "contract renewal terms" --storage postgres --backend hybrid
 ```
+
+Postgres `exact` uses pgvector cosine ordering. Postgres `hybrid` fuses pgvector candidates with `psql_bm25s` candidates in SQL, so production search does not need to pull every chunk into the app process. SQLite keeps the same backend names but uses local FTS5 plus in-process vector scoring.
+
+For local production-mode testing, Docker can start a disposable PostgreSQL 18 database with both extensions:
+
+```bash
+bun run postgres:up
+bun run smoke:postgres
+bun run postgres:down
+```
+
+`bun run postgres:up` prints a `postgres://...` URL on port `55432`. `bun run smoke:postgres` uses its own temporary container on port `55433`, ingests a small corpus, and exercises Postgres `bm25`, `exact`, and `hybrid` search.
 
 Retrieval backends:
 

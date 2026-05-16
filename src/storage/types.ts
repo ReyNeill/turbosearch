@@ -11,6 +11,11 @@ export type LexicalSearchResult = {
   score: number;
 };
 
+export type VectorSearchResult = {
+  chunk: StoredChunk;
+  score: number;
+};
+
 export interface SearchStorage {
   close(): void | Promise<void>;
   replaceDocument(
@@ -21,5 +26,12 @@ export interface SearchStorage {
   ): void | Promise<void>;
   getAllChunks(): StoredChunk[] | Promise<StoredChunk[]>;
   searchLexical(query: string, k: number): LexicalSearchResult[] | Promise<LexicalSearchResult[]>;
+  searchVector?(queryVector: Float32Array, k: number): VectorSearchResult[] | Promise<VectorSearchResult[]>;
+  searchHybrid?(
+    query: string,
+    queryVector: Float32Array,
+    k: number,
+    candidateLimit: number
+  ): VectorSearchResult[] | Promise<VectorSearchResult[]>;
   getStats(): StorageStats | Promise<StorageStats>;
 }

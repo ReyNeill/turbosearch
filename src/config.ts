@@ -15,6 +15,8 @@ export type AppConfig = {
   dbPath: string;
   postgresUrl: string;
   postgresUsePsqlBm25s: boolean;
+  postgresUsePgvector: boolean;
+  postgresVectorIndex: boolean;
   embeddingProvider: EmbeddingProviderName;
   openAiEmbeddingModel: string;
   embeddingDimensions: number;
@@ -71,6 +73,8 @@ export function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     dbPath: ".turbosearch/index.sqlite",
     postgresUrl: process.env.TURBOSEARCH_POSTGRES_URL ?? "",
     postgresUsePsqlBm25s: parseBoolean(process.env.TURBOSEARCH_POSTGRES_PSQL_BM25S, true),
+    postgresUsePgvector: parseBoolean(process.env.TURBOSEARCH_POSTGRES_PGVECTOR, true),
+    postgresVectorIndex: parseBoolean(process.env.TURBOSEARCH_POSTGRES_VECTOR_INDEX, true),
     embeddingProvider: parseEmbeddingProvider(process.env.TURBOSEARCH_EMBEDDING_PROVIDER),
     openAiEmbeddingModel: process.env.TURBOSEARCH_OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small",
     embeddingDimensions: Number(process.env.TURBOSEARCH_EMBEDDING_DIMENSIONS ?? 1536),

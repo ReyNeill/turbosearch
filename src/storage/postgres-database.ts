@@ -1,11 +1,14 @@
 import type { ExtractedDocument, StoredChunk, TextChunk } from "../types.ts";
 import { sha256Text } from "../utils/hash.ts";
 import type { TurboQuantEncoded } from "../vector/turboquant/index.ts";
-import type { LexicalSearchResult, SearchStorage, StorageStats } from "./types.ts";
+import type { LexicalSearchResult, SearchStorage, StorageStats, VectorSearchResult } from "./types.ts";
 
 type PostgresSearchDatabaseOptions = {
   url: string;
   usePsqlBm25s: boolean;
+  usePgvector: boolean;
+  vectorIndex: boolean;
+  embeddingDimensions: number;
 };
 
 type PostgresChunkRow = {
@@ -17,13 +20,21 @@ type PostgresChunkRow = {
   start_offset: number;
   end_offset: number;
   metadata_json: Record<string, unknown> | string;
-  embedding: number[] | string;
+  embedding: number[] | string | null;
   turbo_code: Uint8Array | ArrayBuffer | null;
   turbo_norm: number | string | null;
 };
 
 type PostgresLexicalChunkRow = PostgresChunkRow & {
   lexical_score: number | string;
+};
+
+type PostgresVectorChunkRow = PostgresChunkRow & {
+  vector_score: number | string;
+};
+
+type PostgresHybridChunkRow = PostgresChunkRow & {
+  hybrid_score: number | string;
 };
 
 export class PostgresSearchDatabase implements SearchStorage {
@@ -33,6 +44,9 @@ export class PostgresSearchDatabase implements SearchStorage {
   constructor(private readonly options: PostgresSearchDatabaseOptions) {
     if (!options.url) {
       throw new Error("TURBOSEARCH_POSTGRES_URL is required when --storage postgres is used.");
+    }
+    if (!Number.isInteger(options.embeddingDimensions) || options.embeddingDimensions <= 0) {
+      throw new Error("Postgres pgvector storage requires a positive embedding dimension.");
     }
 
     this.sql = new Bun.SQL(options.url);
@@ -80,6 +94,11 @@ export class PostgresSearchDatabase implements SearchStorage {
         const embedding = embeddings[i];
         const turboVector = turboVectors[i] ?? null;
         if (!chunk || !embedding) continue;
+        if (embedding.length !== this.options.embeddingDimensions) {
+          throw new Error(
+            `Embedding dimension ${embedding.length} does not match Postgres vector dimension ${this.options.embeddingDimensions}.`
+          );
+        }
 
         await sql`
           INSERT INTO turbosearch_chunks (
@@ -99,13 +118,15 @@ export class PostgresSearchDatabase implements SearchStorage {
             ${chunk.startOffset},
             ${chunk.endOffset},
             ${JSON.stringify(chunk.metadata)}::jsonb,
-            ${sql.array(Array.from(embedding), "real")},
+            ${toVectorLiteral(embedding)}::vector,
             ${turboVector?.code ?? null},
             ${turboVector?.norm ?? null}
           )
         `;
       }
     });
+
+    await this.ensureBm25Index();
   }
 
   async getAllChunks(): Promise<StoredChunk[]> {
@@ -120,7 +141,7 @@ export class PostgresSearchDatabase implements SearchStorage {
         turbosearch_chunks.start_offset,
         turbosearch_chunks.end_offset,
         turbosearch_chunks.metadata_json,
-        turbosearch_chunks.embedding,
+        turbosearch_chunks.embedding::text AS embedding,
         turbosearch_chunks.turbo_code,
         turbosearch_chunks.turbo_norm
       FROM turbosearch_chunks
@@ -134,6 +155,7 @@ export class PostgresSearchDatabase implements SearchStorage {
   async searchLexical(query: string, k: number): Promise<LexicalSearchResult[]> {
     await this.ready;
     if (!this.options.usePsqlBm25s) return [];
+    await this.ensureBm25Index();
 
     const rows = await this.sql<PostgresLexicalChunkRow[]>`
       SELECT
@@ -145,7 +167,7 @@ export class PostgresSearchDatabase implements SearchStorage {
         turbosearch_chunks.start_offset,
         turbosearch_chunks.end_offset,
         turbosearch_chunks.metadata_json,
-        turbosearch_chunks.embedding,
+        turbosearch_chunks.embedding::text AS embedding,
         turbosearch_chunks.turbo_code,
         turbosearch_chunks.turbo_norm,
         hit.score AS lexical_score
@@ -158,6 +180,97 @@ export class PostgresSearchDatabase implements SearchStorage {
     return rows.map((row) => ({
       chunk: rowToStoredChunk(row),
       score: Number(row.lexical_score)
+    }));
+  }
+
+  async searchVector(queryVector: Float32Array, k: number): Promise<VectorSearchResult[]> {
+    await this.ready;
+    if (!this.options.usePgvector) return [];
+
+    const rows = await this.sql<PostgresVectorChunkRow[]>`
+      SELECT
+        turbosearch_chunks.id,
+        turbosearch_chunks.document_id,
+        turbosearch_documents.path AS document_path,
+        turbosearch_chunks.ordinal,
+        turbosearch_chunks.content AS text,
+        turbosearch_chunks.start_offset,
+        turbosearch_chunks.end_offset,
+        turbosearch_chunks.metadata_json,
+        turbosearch_chunks.embedding::text AS embedding,
+        turbosearch_chunks.turbo_code,
+        turbosearch_chunks.turbo_norm,
+        1 - (turbosearch_chunks.embedding <=> ${toVectorLiteral(queryVector)}::vector) AS vector_score
+      FROM turbosearch_chunks
+      INNER JOIN turbosearch_documents ON turbosearch_documents.id = turbosearch_chunks.document_id
+      ORDER BY turbosearch_chunks.embedding <=> ${toVectorLiteral(queryVector)}::vector
+      LIMIT ${k}
+    `;
+
+    return rows.map((row) => ({
+      chunk: rowToStoredChunk(row),
+      score: Number(row.vector_score)
+    }));
+  }
+
+  async searchHybrid(
+    query: string,
+    queryVector: Float32Array,
+    k: number,
+    candidateLimit: number
+  ): Promise<VectorSearchResult[]> {
+    await this.ready;
+    if (!this.options.usePsqlBm25s || !this.options.usePgvector) return [];
+    await this.ensureBm25Index();
+
+    const vectorLiteral = toVectorLiteral(queryVector);
+    const rows = await this.sql<PostgresHybridChunkRow[]>`
+      WITH vector_ranked AS (
+        SELECT
+          id,
+          row_number() OVER (ORDER BY embedding <=> ${vectorLiteral}::vector) AS vector_rank
+        FROM turbosearch_chunks
+        ORDER BY embedding <=> ${vectorLiteral}::vector
+        LIMIT ${candidateLimit}
+      ),
+      lexical_ranked AS (
+        SELECT
+          turbosearch_chunks.id,
+          row_number() OVER (ORDER BY hit.score DESC, turbosearch_chunks.id ASC) AS lexical_rank
+        FROM psql_bm25s_query('turbosearch_chunks_bm25_idx'::regclass, ${query}, ${candidateLimit}) AS hit
+        INNER JOIN turbosearch_chunks ON turbosearch_chunks.ctid = hit.ctid
+      ),
+      fused AS (
+        SELECT
+          COALESCE(vector_ranked.id, lexical_ranked.id) AS id,
+          COALESCE(0.55 / (60 + vector_ranked.vector_rank), 0) +
+            COALESCE(0.45 / (60 + lexical_ranked.lexical_rank), 0) AS hybrid_score
+        FROM vector_ranked
+        FULL OUTER JOIN lexical_ranked ON lexical_ranked.id = vector_ranked.id
+      )
+      SELECT
+        turbosearch_chunks.id,
+        turbosearch_chunks.document_id,
+        turbosearch_documents.path AS document_path,
+        turbosearch_chunks.ordinal,
+        turbosearch_chunks.content AS text,
+        turbosearch_chunks.start_offset,
+        turbosearch_chunks.end_offset,
+        turbosearch_chunks.metadata_json,
+        turbosearch_chunks.embedding::text AS embedding,
+        turbosearch_chunks.turbo_code,
+        turbosearch_chunks.turbo_norm,
+        fused.hybrid_score
+      FROM fused
+      INNER JOIN turbosearch_chunks ON turbosearch_chunks.id = fused.id
+      INNER JOIN turbosearch_documents ON turbosearch_documents.id = turbosearch_chunks.document_id
+      ORDER BY fused.hybrid_score DESC, turbosearch_chunks.id ASC
+      LIMIT ${k}
+    `;
+
+    return rows.map((row) => ({
+      chunk: rowToStoredChunk(row),
+      score: Number(row.hybrid_score)
     }));
   }
 
@@ -177,6 +290,18 @@ export class PostgresSearchDatabase implements SearchStorage {
   }
 
   private async migrate(): Promise<void> {
+    if (!this.options.usePgvector) {
+      throw new Error("Postgres storage requires pgvector. Set TURBOSEARCH_POSTGRES_PGVECTOR=true and install the vector extension.");
+    }
+    const dimension = this.options.embeddingDimensions;
+
+    try {
+      await this.sql`CREATE EXTENSION IF NOT EXISTS vector`;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Postgres storage requires the pgvector extension for vector search: ${message}`);
+    }
+
     await this.sql`
       CREATE TABLE IF NOT EXISTS turbosearch_documents (
         id BIGSERIAL PRIMARY KEY,
@@ -189,8 +314,7 @@ export class PostgresSearchDatabase implements SearchStorage {
       )
     `;
 
-    // Keep vectors as REAL[] until a pgvector/VectorChord adapter exists; psql_bm25s owns lexical retrieval in this backend.
-    await this.sql`
+    await this.sql.unsafe(`
       CREATE TABLE IF NOT EXISTS turbosearch_chunks (
         id BIGSERIAL PRIMARY KEY,
         document_id BIGINT NOT NULL REFERENCES turbosearch_documents(id) ON DELETE CASCADE,
@@ -199,22 +323,85 @@ export class PostgresSearchDatabase implements SearchStorage {
         start_offset INTEGER NOT NULL,
         end_offset INTEGER NOT NULL,
         metadata_json JSONB NOT NULL,
-        embedding REAL[] NOT NULL,
+        embedding vector(${dimension}) NOT NULL,
         turbo_code BYTEA,
         turbo_norm DOUBLE PRECISION,
         UNIQUE(document_id, ordinal)
       )
-    `;
+    `);
+
+    await this.ensureVectorColumn(dimension);
 
     await this.sql`
       CREATE INDEX IF NOT EXISTS turbosearch_chunks_document_id_idx
       ON turbosearch_chunks(document_id)
     `;
 
-    if (!this.options.usePsqlBm25s) return;
+    if (this.options.vectorIndex) {
+      await this.sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS turbosearch_chunks_embedding_hnsw_idx
+        ON turbosearch_chunks USING hnsw (embedding vector_cosine_ops)
+      `);
+    }
 
     try {
       await this.sql`CREATE EXTENSION IF NOT EXISTS psql_bm25s`;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Postgres storage requires the psql_bm25s extension for BM25 search: ${message}`);
+    }
+  }
+
+  private async ensureVectorColumn(dimension: number): Promise<void> {
+    const [column] = await this.sql<{ column_type: string }[]>`
+      SELECT format_type(pg_attribute.atttypid, pg_attribute.atttypmod) AS column_type
+      FROM pg_attribute
+      INNER JOIN pg_class ON pg_class.oid = pg_attribute.attrelid
+      INNER JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace
+      WHERE pg_namespace.nspname = current_schema()
+        AND pg_class.relname = 'turbosearch_chunks'
+        AND pg_attribute.attname = 'embedding'
+        AND NOT pg_attribute.attisdropped
+    `;
+    const columnType = column?.column_type;
+    const expected = `vector(${dimension})`;
+    if (!columnType || columnType === expected) return;
+
+    if (columnType === "real[]" || columnType === "double precision[]") {
+      await this.sql.unsafe(`
+        ALTER TABLE turbosearch_chunks
+        ALTER COLUMN embedding TYPE vector(${dimension})
+        USING ('[' || array_to_string(embedding, ',') || ']')::vector(${dimension})
+      `);
+      return;
+    }
+
+    // A populated vector column with a different dimension likely belongs to a different embedding model.
+    // Re-indexing is safer than silently reshaping vectors and corrupting retrieval scores.
+    throw new Error(
+      `Existing Postgres embedding column is ${columnType}, expected ${expected}. Recreate the index or use the original embedding dimension.`
+    );
+  }
+
+  private async ensureBm25Index(): Promise<void> {
+    if (!this.options.usePsqlBm25s) return;
+
+    const [existing] = await this.sql<{ exists: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM pg_class
+        WHERE oid = to_regclass('turbosearch_chunks_bm25_idx')
+      ) AS exists
+    `;
+    if (existing?.exists) return;
+
+    const [stats] = await this.sql<{ count: string | number }[]>`
+      SELECT count(*) AS count FROM turbosearch_chunks
+    `;
+    if (Number(stats?.count ?? 0) === 0) return;
+
+    try {
+      // psql_bm25s v0.4.14 rejects scalar-text index builds on empty tables, so this is intentionally lazy.
       await this.sql`
         CREATE INDEX IF NOT EXISTS turbosearch_chunks_bm25_idx
         ON turbosearch_chunks USING psql_bm25s (content)
@@ -236,7 +423,7 @@ function rowToStoredChunk(row: PostgresChunkRow): StoredChunk {
     startOffset: row.start_offset,
     endOffset: row.end_offset,
     metadata: parseJsonRecord(row.metadata_json),
-    embedding: Float32Array.from(parseRealArray(row.embedding)),
+    embedding: Float32Array.from(parseVector(row.embedding)),
     turboCode: toUint8Array(row.turbo_code),
     turboNorm: row.turbo_norm === null ? null : Number(row.turbo_norm)
   };
@@ -247,10 +434,18 @@ function parseJsonRecord(value: Record<string, unknown> | string): Record<string
   return value;
 }
 
-function parseRealArray(value: number[] | string): number[] {
+function parseVector(value: number[] | string | null): number[] {
+  if (value === null) return [];
   if (Array.isArray(value)) return value.map(Number);
   const trimmed = value.trim();
-  if (!trimmed || trimmed === "{}") return [];
+  if (!trimmed || trimmed === "{}" || trimmed === "[]") return [];
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+    return trimmed
+      .slice(1, -1)
+      .split(",")
+      .filter(Boolean)
+      .map((item) => Number(item));
+  }
   return trimmed
     .slice(1, -1)
     .split(",")
@@ -261,4 +456,8 @@ function toUint8Array(value: Uint8Array | ArrayBuffer | null): Uint8Array | null
   if (value === null) return null;
   if (value instanceof Uint8Array) return value;
   return new Uint8Array(value);
+}
+
+function toVectorLiteral(vector: Float32Array): string {
+  return `[${Array.from(vector, (value) => String(Number(value))).join(",")}]`;
 }

@@ -10,6 +10,10 @@
     "ingest": "bun run src/cli.ts ingest",
     "search": "bun run src/cli.ts search",
     "stats": "bun run src/cli.ts stats",
+    "postgres:build": "scripts/postgres-db.sh build",
+    "postgres:up": "scripts/postgres-db.sh up",
+    "postgres:down": "scripts/postgres-db.sh down",
+    "smoke:postgres": "scripts/postgres-smoke.sh",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "check": "bun run typecheck && bun test"
