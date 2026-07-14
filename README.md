@@ -55,6 +55,30 @@ bun run src/cli.ts ingest docs --jsonl
 
 Each line is an event such as `document_started`, `extraction_pending`, `document_indexed`, or `ingest_done`.
 
+## Org-brain corpus mode
+
+The `org-brain` adapter parses the repository's restricted frontmatter, indexes
+Markdown sections without treating frontmatter as evidence, and attaches stable
+entry ids, lifecycle state, headings, and line ranges to every result. Active
+entries are searched by default; project, type, state, author, tag, and date
+filters are available.
+
+```bash
+bun run src/cli.ts ingest /path/to/org-brain \
+  --corpus org-brain --embedding openai --db .turbosearch/org-brain.sqlite
+bun run src/cli.ts search "How do production releases work?" \
+  --corpus org-brain --project silixon-core --backend hybrid \
+  --embedding openai --db .turbosearch/org-brain.sqlite
+```
+
+Ingestion is incremental by content hash and removes indexed documents that no
+longer exist in the corpus. Run the versioned retrieval evaluation dataset with:
+
+```bash
+bun run src/cli.ts eval --dataset /path/to/org-brain/evals/search.json \
+  --backend hybrid --embedding openai --db .turbosearch/org-brain.sqlite
+```
+
 ## Extraction Support
 
 TurboSearch indexes only real extracted evidence. It does not index filenames as semantic evidence.

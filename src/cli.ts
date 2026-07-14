@@ -1,11 +1,19 @@
 #!/usr/bin/env bun
 import { createConfig, loadEnvLocal, type AppConfig } from "./config.ts";
 import { createEmbeddingProvider } from "./embeddings/provider.ts";
+import { evaluateRetrieval, loadRetrievalEvalDataset } from "./eval/retrieval.ts";
 import { extractEvidence } from "./ingest/extractors.ts";
 import { createOcrProvider } from "./ocr/provider.ts";
 import { SearchEngine } from "./search/search-engine.ts";
+import { distinctDocumentResults } from "./search/result-utils.ts";
 import { createTranscriptionProvider } from "./transcription/provider.ts";
-import type { EmbeddingProviderName, PdfParserName, SearchBackendName, StorageProviderName } from "./types.ts";
+import type {
+  EmbeddingProviderName,
+  PdfParserName,
+  SearchBackendName,
+  SearchFilters,
+  StorageProviderName
+} from "./types.ts";
 
 type ParsedArgs = {
   command: string | undefined;
@@ -52,10 +60,25 @@ async function main(): Promise<void> {
       return;
     }
 
+    if (command === "eval") {
+      await runEval(engine, args, payload);
+      return;
+    }
+
     throw new Error(`Unknown command: ${command}`);
   } finally {
     await engine.close();
   }
+}
+
+async function runEval(engine: SearchEngine, args: ParsedArgs, payload: JsonPayload): Promise<void> {
+  const datasetPath = getString(payload, "dataset") ?? stringFlag(args.flags.dataset) ?? args.positionals[0];
+  if (!datasetPath) throw new Error("eval requires --dataset <path>.");
+  const dataset = await loadRetrievalEvalDataset(datasetPath);
+  const backend = parseBackend(getValue(args.flags.backend, payload.backend));
+  const k = getNumber(payload, "k") ?? Number(args.flags.k ?? 5);
+  const report = await evaluateRetrieval(engine, dataset, { backend, k });
+  writeJson({ ok: true, command: "eval", backend, ...report });
 }
 
 async function runIngest(engine: SearchEngine, args: ParsedArgs, payload: JsonPayload): Promise<void> {
@@ -65,7 +88,14 @@ async function runIngest(engine: SearchEngine, args: ParsedArgs, payload: JsonPa
   }
 
   const jsonl = args.flags.jsonl === true || payload.jsonl === true;
-  const summary = await engine.ingestPaths(paths, jsonl ? (event) => writeJsonLine(event) : undefined);
+  const corpus = parseCorpus(getValue(args.flags.corpus, payload.corpus));
+  const onEvent = jsonl ? (event: Parameters<NonNullable<Parameters<SearchEngine["ingestPaths"]>[1]>>[0]) => writeJsonLine(event) : undefined;
+  if (corpus === "org-brain" && paths.length !== 1) {
+    throw new Error("org-brain ingestion requires exactly one repository root path.");
+  }
+  const summary = corpus === "org-brain"
+    ? await engine.ingestOrgBrain(paths[0] as string, onEvent)
+    : await engine.ingestPaths(paths, onEvent);
   if (!jsonl) writeJson({ ok: true, command: "ingest", summary });
 }
 
@@ -75,9 +105,33 @@ async function runSearch(engine: SearchEngine, args: ParsedArgs, payload: JsonPa
 
   const backend = parseBackend(getValue(args.flags.backend, payload.backend));
   const k = getNumber(payload, "k") ?? Number(args.flags.k ?? 10);
-  const results = await engine.search(query, { backend, k });
+  const corpus = parseCorpus(getValue(args.flags.corpus, payload.corpus));
+  const includeInactive = parseBoolean(getValue(args.flags["include-inactive"], payload.includeInactive), false);
+  const filters = searchFilters(args, payload, corpus, includeInactive);
+  const candidates = await engine.search(query, { backend, k: corpus === "org-brain" ? k * 10 : k, filters });
+  const results = corpus === "org-brain" ? distinctDocumentResults(candidates, k) : candidates;
 
-  writeJson({ ok: true, command: "search", query, backend, k, results });
+  writeJson({ ok: true, command: "search", query, backend, k, filters, results });
+}
+
+function searchFilters(
+  args: ParsedArgs,
+  payload: JsonPayload,
+  corpus: "org-brain" | undefined,
+  includeInactive: boolean
+): SearchFilters | undefined {
+  const tags = getStringArray(payload, "tags") ?? commaSeparated(args.flags.tags);
+  const filters: SearchFilters = {
+    corpus,
+    project: getString(payload, "project") ?? stringFlag(args.flags.project),
+    type: getString(payload, "type") ?? stringFlag(args.flags.type),
+    state: getString(payload, "state") ?? stringFlag(args.flags.state) ?? (corpus === "org-brain" && !includeInactive ? "active" : undefined),
+    author: getString(payload, "author") ?? stringFlag(args.flags.author),
+    tags: tags.length > 0 ? tags : undefined,
+    dateFrom: getString(payload, "dateFrom") ?? stringFlag(args.flags["date-from"]),
+    dateTo: getString(payload, "dateTo") ?? stringFlag(args.flags["date-to"])
+  };
+  return Object.values(filters).some((value) => value !== undefined) ? filters : undefined;
 }
 
 async function runExtract(args: ParsedArgs, payload: JsonPayload, config: AppConfig): Promise<void> {
@@ -140,6 +194,12 @@ function parseStorageProvider(value: string | boolean | undefined): StorageProvi
   if (value === "postgres") return "postgres";
   if (value === "sqlite" || value === undefined || value === false) return "sqlite";
   throw new Error(`Unsupported storage provider: ${String(value)}`);
+}
+
+function parseCorpus(value: string | boolean | undefined): "org-brain" | undefined {
+  if (value === "org-brain") return "org-brain";
+  if (value === undefined || value === false) return undefined;
+  throw new Error(`Unsupported corpus adapter: ${String(value)}`);
 }
 
 function parseTranscriptionProvider(value: string | boolean | undefined): AppConfig["transcriptionProvider"] {
@@ -234,10 +294,11 @@ function printHelp(): void {
   console.log(`TurboSearch
 
 Usage:
-  bun run src/cli.ts ingest <file-or-directory...> [--storage sqlite|postgres] [--db path] [--embedding hash|openai]
-  bun run src/cli.ts search <query> [--backend exact|turbo|bm25|hybrid] [--k 10] [--storage sqlite|postgres]
+  bun run src/cli.ts ingest <file-or-directory...> [--corpus org-brain] [--storage sqlite|postgres] [--db path]
+  bun run src/cli.ts search <query> [--corpus org-brain] [--backend exact|turbo|bm25|hybrid] [--k 10]
   bun run src/cli.ts extract <file> [--json]
   bun run src/cli.ts stats [--db path]
+  bun run src/cli.ts eval --dataset evals/search.json [--backend hybrid] [--k 5]
 
 JSON mode:
   bun run src/cli.ts ingest --json '{"paths":["docs"],"db":".turbosearch/index.sqlite"}'
@@ -256,6 +317,16 @@ Options:
   --postgres-vector-index
                    true by default; creates an HNSW cosine index for pgvector
   --backend        exact, turbo, bm25, or hybrid
+  --corpus         org-brain enables schema-aware ingestion, lifecycle defaults, and citations
+  --project        filter org-brain results by project
+  --type           filter org-brain results by entry type
+  --state          filter org-brain results by lifecycle state; active is the default
+  --author         filter org-brain results by author
+  --tags           comma-separated tags; every tag must match
+  --date-from      inclusive YYYY-MM-DD lower bound
+  --date-to        inclusive YYYY-MM-DD upper bound
+  --include-inactive
+                   do not apply the default active lifecycle filter
   --pdf-parser     liteparse by default; use pdftotext to skip LiteParse
   --ocr            ollama-glm-ocr by default; use none to skip OCR or vllm-glm-ocr for prod placeholder
   --ocr-mode       text, table, formula, or figure
@@ -321,6 +392,16 @@ function getValue(primary: unknown, fallback: unknown): string | boolean | undef
   if (typeof primary === "string" || typeof primary === "boolean") return primary;
   if (typeof fallback === "string" || typeof fallback === "boolean") return fallback;
   return undefined;
+}
+
+function stringFlag(value: string | boolean | undefined): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function commaSeparated(value: string | boolean | undefined): string[] {
+  return typeof value === "string"
+    ? value.split(",").map((item) => item.trim()).filter(Boolean)
+    : [];
 }
 
 function isRecord(value: unknown): value is JsonPayload {

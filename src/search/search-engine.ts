@@ -1,5 +1,6 @@
 import type { AppConfig } from "../config.ts";
 import { chunkDocument } from "../chunking/chunker.ts";
+import { collectOrgBrainEntryPaths, loadOrgBrainDocument } from "../corpora/org-brain.ts";
 import type { EmbeddingProvider } from "../embeddings/provider.ts";
 import { extractEvidence } from "../ingest/extractors.ts";
 import { createOcrProvider, type OcrProvider } from "../ocr/provider.ts";
@@ -12,11 +13,13 @@ import type {
   IngestEvent,
   IngestSummary,
   SearchBackendName,
+  SearchFilters,
   SearchResult,
   StoredChunk,
   TextChunk
 } from "../types.ts";
 import { collectInputFiles } from "../utils/files.ts";
+import { sha256Text } from "../utils/hash.ts";
 import { cosine } from "../vector/math.ts";
 import { TurboQuantCodec } from "../vector/turboquant/index.ts";
 
@@ -93,7 +96,7 @@ export class SearchEngine {
         continue;
       }
 
-      const vectors = await this.embeddings.embedTexts(chunks.map((chunk) => chunk.text));
+      const vectors = await this.embeddings.embedTexts(chunks.map(chunkEmbeddingText));
       const turboVectors = vectors.map((vector) => this.turbo.encode(vector));
       await this.database.replaceDocument(document, chunks, vectors, turboVectors);
 
@@ -106,9 +109,72 @@ export class SearchEngine {
     return summary;
   }
 
-  async search(query: string, options: { backend?: SearchBackendName; k?: number } = {}): Promise<SearchResult[]> {
+  async ingestOrgBrain(root: string, onEvent?: (event: IngestEvent) => void): Promise<IngestSummary> {
+    const files = await collectOrgBrainEntryPaths(root);
+    const summary: IngestSummary = {
+      documents: 0,
+      chunks: 0,
+      skipped: 0,
+      pendingExtractions: 0,
+      unchanged: 0,
+      removed: 0
+    };
+    const indexedPaths = new Set<string>();
+
+    for (const file of files) {
+      onEvent?.({ type: "document_started", path: file });
+      const parsed = await loadOrgBrainDocument(root, file, {
+        targetTokens: this.config.chunkTokens,
+        overlapTokens: this.config.chunkOverlapTokens
+      });
+      indexedPaths.add(parsed.document.path);
+      const existingHash = await this.database.getDocumentHash(parsed.document.path);
+      if (existingHash === sha256Text(parsed.document.text)) {
+        summary.unchanged = (summary.unchanged ?? 0) + 1;
+        onEvent?.({ type: "document_unchanged", path: parsed.document.path });
+        continue;
+      }
+
+      const vectors = await this.embeddings.embedTexts(parsed.chunks.map(chunkEmbeddingText));
+      const turboVectors = vectors.map((vector) => this.turbo.encode(vector));
+      await this.database.replaceDocument(parsed.document, parsed.chunks, vectors, turboVectors);
+      summary.documents += 1;
+      summary.chunks += parsed.chunks.length;
+      onEvent?.({ type: "document_indexed", path: parsed.document.path, chunks: parsed.chunks.length });
+    }
+
+    const stalePaths = (await this.database.listDocumentPaths()).filter((path) => !indexedPaths.has(path));
+    summary.removed = await this.database.deleteDocuments(stalePaths);
+    onEvent?.({ type: "ingest_done", summary });
+    return summary;
+  }
+
+  async search(
+    query: string,
+    options: { backend?: SearchBackendName; k?: number; filters?: SearchFilters } = {}
+  ): Promise<SearchResult[]> {
     const backend = options.backend ?? this.config.defaultBackend;
     const k = options.k ?? 10;
+    const filters = options.filters;
+
+    if (filters && Object.keys(filters).length > 0) {
+      const chunks = (await this.database.getAllChunks()).filter((chunk) => chunkMatchesFilters(chunk, filters));
+      if (backend === "bm25") {
+        return (await this.database.searchLexical(query, Math.max(k, chunks.length)))
+          .filter(({ chunk }) => chunkMatchesFilters(chunk, filters))
+          .slice(0, k)
+          .map(({ chunk, score }) => toSearchResult(chunk, score));
+      }
+
+      const queryVector = await this.embeddings.embedText(query);
+      if (backend === "hybrid") {
+        const lexical = (await this.database.searchLexical(query, Math.max(k, chunks.length)))
+          .filter(({ chunk }) => chunkMatchesFilters(chunk, filters));
+        return this.searchHybrid(queryVector, chunks, lexical, k);
+      }
+      if (backend === "turbo") return this.searchTurbo(queryVector, chunks, k);
+      return this.searchExact(queryVector, chunks, k);
+    }
 
     if (backend === "bm25") {
       return (await this.database.searchLexical(query, k)).map(({ chunk, score }) => toSearchResult(chunk, score));
@@ -275,16 +341,56 @@ function toDocument(extraction: Awaited<ReturnType<typeof extractEvidence>>): Ex
 }
 
 function toSearchResult(chunk: StoredChunk, score: number): SearchResult {
+  const { embeddingText: _embeddingText, ...metadata } = chunk.metadata;
   return {
     chunkId: chunk.id,
     documentPath: chunk.documentPath,
     score,
     text: chunk.text,
     metadata: {
-      ...chunk.metadata,
+      ...metadata,
       ordinal: chunk.ordinal,
       startOffset: chunk.startOffset,
       endOffset: chunk.endOffset
     }
   };
+}
+
+function chunkEmbeddingText(chunk: TextChunk): string {
+  return typeof chunk.metadata.embeddingText === "string" ? chunk.metadata.embeddingText : chunk.text;
+}
+
+function chunkMatchesFilters(chunk: StoredChunk, filters: SearchFilters): boolean {
+  if (filters.corpus && chunk.metadata.corpus !== filters.corpus) return false;
+  const orgBrain = asRecord(chunk.metadata.orgBrain);
+  if (!orgBrain) return !requiresOrgBrainMetadata(filters);
+  if (filters.project && !sameText(orgBrain.project, filters.project)) return false;
+  if (filters.type && !sameText(orgBrain.type, filters.type)) return false;
+  if (filters.state && !sameText(orgBrain.state, filters.state)) return false;
+  if (filters.author && !sameText(orgBrain.author, filters.author)) return false;
+  if (filters.dateFrom && (typeof orgBrain.date !== "string" || orgBrain.date < filters.dateFrom)) return false;
+  if (filters.dateTo && (typeof orgBrain.date !== "string" || orgBrain.date > filters.dateTo)) return false;
+  if (filters.tags && filters.tags.length > 0) {
+    const tags = Array.isArray(orgBrain.tags)
+      ? orgBrain.tags.filter((tag): tag is string => typeof tag === "string").map((tag) => tag.toLowerCase())
+      : [];
+    if (!filters.tags.every((tag) => tags.includes(tag.toLowerCase()))) return false;
+  }
+  return true;
+}
+
+function requiresOrgBrainMetadata(filters: SearchFilters): boolean {
+  return Boolean(
+    filters.project || filters.type || filters.state || filters.author || filters.dateFrom || filters.dateTo || filters.tags?.length
+  );
+}
+
+function sameText(value: unknown, expected: string): boolean {
+  return typeof value === "string" && value.toLowerCase() === expected.toLowerCase();
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }

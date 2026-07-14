@@ -45,6 +45,10 @@ test("SQLite storage keeps FTS BM25 index in sync with replaced documents", () =
 
     expect(db.searchLexical("keyword", 5)).toHaveLength(0);
     expect(db.searchLexical("replacement", 5)[0]?.chunk.text).toBe("beta replacement");
+    expect(db.getDocumentHash("sample.txt")).not.toBeNull();
+    expect(db.listDocumentPaths()).toEqual(["sample.txt"]);
+    expect(db.deleteDocuments(["sample.txt"])).toBe(1);
+    expect(db.getStats()).toEqual({ documents: 0, chunks: 0 });
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

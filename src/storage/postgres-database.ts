@@ -129,6 +129,35 @@ export class PostgresSearchDatabase implements SearchStorage {
     await this.ensureBm25Index();
   }
 
+  async getDocumentHash(path: string): Promise<string | null> {
+    await this.ready;
+    const [row] = await this.sql<{ sha256: string }[]>`
+      SELECT sha256 FROM turbosearch_documents WHERE path = ${path}
+    `;
+    return row?.sha256 ?? null;
+  }
+
+  async listDocumentPaths(): Promise<string[]> {
+    await this.ready;
+    const rows = await this.sql<{ path: string }[]>`
+      SELECT path FROM turbosearch_documents ORDER BY path
+    `;
+    return rows.map((row) => row.path);
+  }
+
+  async deleteDocuments(paths: string[]): Promise<number> {
+    await this.ready;
+    if (paths.length === 0) return 0;
+    let removed = 0;
+    for (const path of paths) {
+      const rows = await this.sql<{ id: number | string }[]>`
+        DELETE FROM turbosearch_documents WHERE path = ${path} RETURNING id
+      `;
+      removed += rows.length;
+    }
+    return removed;
+  }
+
   async getAllChunks(): Promise<StoredChunk[]> {
     await this.ready;
     const rows = await this.sql<PostgresChunkRow[]>`

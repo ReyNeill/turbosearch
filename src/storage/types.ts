@@ -24,6 +24,9 @@ export interface SearchStorage {
     embeddings: Float32Array[],
     turboVectors: Array<TurboQuantEncoded | null>
   ): void | Promise<void>;
+  getDocumentHash(path: string): string | null | Promise<string | null>;
+  listDocumentPaths(): string[] | Promise<string[]>;
+  deleteDocuments(paths: string[]): number | Promise<number>;
   getAllChunks(): StoredChunk[] | Promise<StoredChunk[]>;
   searchLexical(query: string, k: number): LexicalSearchResult[] | Promise<LexicalSearchResult[]>;
   searchVector?(queryVector: Float32Array, k: number): VectorSearchResult[] | Promise<VectorSearchResult[]>;

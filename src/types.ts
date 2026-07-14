@@ -80,15 +80,29 @@ export type SearchResult = {
   metadata: Record<string, unknown>;
 };
 
+export type SearchFilters = {
+  corpus?: string;
+  project?: string;
+  type?: string;
+  state?: string;
+  author?: string;
+  tags?: string[];
+  dateFrom?: string;
+  dateTo?: string;
+};
+
 export type IngestSummary = {
   documents: number;
   chunks: number;
   skipped: number;
   pendingExtractions: number;
+  unchanged?: number;
+  removed?: number;
 };
 
 export type IngestEvent =
   | { type: "document_started"; path: string }
+  | { type: "document_unchanged"; path: string }
   | { type: "document_skipped"; path: string; reason: string }
   | { type: "extraction_pending"; path: string; reason: string; requiredExtractor: string }
   | { type: "document_indexed"; path: string; chunks: number }

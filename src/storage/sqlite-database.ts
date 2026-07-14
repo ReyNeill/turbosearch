@@ -77,6 +77,34 @@ export class SqliteSearchDatabase implements SearchStorage {
     transaction();
   }
 
+  getDocumentHash(path: string): string | null {
+    return this.db.query<{ sha256: string }, [string]>("SELECT sha256 FROM documents WHERE path = ?")
+      .get(path)?.sha256 ?? null;
+  }
+
+  listDocumentPaths(): string[] {
+    return this.db.query<{ path: string }, []>("SELECT path FROM documents ORDER BY path")
+      .all()
+      .map((row) => row.path);
+  }
+
+  deleteDocuments(paths: string[]): number {
+    if (paths.length === 0) return 0;
+    const transaction = this.db.transaction(() => {
+      let removed = 0;
+      for (const path of paths) {
+        const row = this.db.query<{ id: number }, [string]>("SELECT id FROM documents WHERE path = ?").get(path);
+        if (!row) continue;
+        this.deleteChunkFtsRows(row.id);
+        this.db.query("DELETE FROM chunks WHERE document_id = ?").run(row.id);
+        this.db.query("DELETE FROM documents WHERE id = ?").run(row.id);
+        removed += 1;
+      }
+      return removed;
+    });
+    return transaction();
+  }
+
   getAllChunks(): StoredChunk[] {
     const rows = this.db.query<ChunkRow, []>(`
       SELECT
