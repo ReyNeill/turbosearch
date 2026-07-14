@@ -21,6 +21,29 @@ bun run src/cli.ts ingest ./client-data --embedding openai
 bun run src/cli.ts search "contract renewal terms" --embedding openai
 ```
 
+For Silixon's private deployment, run the Apache-2.0
+`unsloth/Qwen3-Embedding-4B` checkpoint behind vLLM's OpenAI-compatible API. The
+recommended 1,024-dimensional Matryoshka output fits pgvector's regular HNSW
+`vector` index while retaining instruction-aware Qwen3 query embeddings:
+
+```bash
+TURBOSEARCH_EMBEDDING_PROVIDER=openai-compatible
+TURBOSEARCH_EMBEDDING_BASE_URL=http://127.0.0.1:8000/v1
+TURBOSEARCH_EMBEDDING_MODEL=unsloth/Qwen3-Embedding-4B
+TURBOSEARCH_EMBEDDING_DIMENSIONS=1024
+TURBOSEARCH_EMBEDDING_AUTH=none
+bun run src/cli.ts ingest ./client-data --embedding openai-compatible
+```
+
+Documents are embedded without a prompt. Queries use Qwen's required
+`Instruct: ...\nQuery:...` format. Override the task sentence with
+`TURBOSEARCH_EMBEDDING_QUERY_INSTRUCTION` for a different corpus.
+
+For SageMaker, use a base URL ending in `/openai/v1` and set
+`TURBOSEARCH_EMBEDDING_AUTH=sagemaker`. TurboSearch resolves the configured AWS
+profile or workload role and creates a five-minute bearer token in memory for
+each request; it never stores or logs the token.
+
 ## What Works Now
 
 - Text and code file ingestion.
@@ -65,10 +88,10 @@ filters are available.
 
 ```bash
 bun run src/cli.ts ingest /path/to/org-brain \
-  --corpus org-brain --embedding openai --db .turbosearch/org-brain.sqlite
+  --corpus org-brain --embedding openai-compatible --db .turbosearch/org-brain.sqlite
 bun run src/cli.ts search "How do production releases work?" \
   --corpus org-brain --project silixon-core --backend hybrid \
-  --embedding openai --db .turbosearch/org-brain.sqlite
+  --embedding openai-compatible --db .turbosearch/org-brain.sqlite
 ```
 
 Ingestion is incremental by content hash and removes indexed documents that no
@@ -76,7 +99,7 @@ longer exist in the corpus. Run the versioned retrieval evaluation dataset with:
 
 ```bash
 bun run src/cli.ts eval --dataset /path/to/org-brain/evals/search.json \
-  --backend hybrid --embedding openai --db .turbosearch/org-brain.sqlite
+  --backend hybrid --embedding openai-compatible --db .turbosearch/org-brain.sqlite
 ```
 
 ## Extraction Support

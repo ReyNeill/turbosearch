@@ -19,6 +19,13 @@ export type AppConfig = {
   postgresVectorIndex: boolean;
   embeddingProvider: EmbeddingProviderName;
   openAiEmbeddingModel: string;
+  compatibleEmbeddingBaseUrl: string;
+  compatibleEmbeddingApiKey: string;
+  compatibleEmbeddingModel: string;
+  compatibleEmbeddingQueryInstruction: string;
+  compatibleEmbeddingAuth: "none" | "bearer" | "sagemaker";
+  awsRegion: string;
+  awsProfile: string;
   embeddingDimensions: number;
   chunkTokens: number;
   chunkOverlapTokens: number;
@@ -77,7 +84,15 @@ export function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     postgresVectorIndex: parseBoolean(process.env.TURBOSEARCH_POSTGRES_VECTOR_INDEX, true),
     embeddingProvider: parseEmbeddingProvider(process.env.TURBOSEARCH_EMBEDDING_PROVIDER),
     openAiEmbeddingModel: process.env.TURBOSEARCH_OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small",
-    embeddingDimensions: Number(process.env.TURBOSEARCH_EMBEDDING_DIMENSIONS ?? 1536),
+    compatibleEmbeddingBaseUrl: process.env.TURBOSEARCH_EMBEDDING_BASE_URL ?? "http://127.0.0.1:8000/v1",
+    compatibleEmbeddingApiKey: process.env.TURBOSEARCH_EMBEDDING_API_KEY ?? "",
+    compatibleEmbeddingModel: process.env.TURBOSEARCH_EMBEDDING_MODEL ?? "unsloth/Qwen3-Embedding-4B",
+    compatibleEmbeddingQueryInstruction: process.env.TURBOSEARCH_EMBEDDING_QUERY_INSTRUCTION
+      ?? "Given a question about Silixon's organizational knowledge, retrieve the most relevant passages that answer it",
+    compatibleEmbeddingAuth: parseCompatibleEmbeddingAuth(process.env.TURBOSEARCH_EMBEDDING_AUTH),
+    awsRegion: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "eu-west-2",
+    awsProfile: process.env.AWS_PROFILE ?? "",
+    embeddingDimensions: Number(process.env.TURBOSEARCH_EMBEDDING_DIMENSIONS ?? 1024),
     chunkTokens: Number(process.env.TURBOSEARCH_CHUNK_TOKENS ?? 700),
     chunkOverlapTokens: Number(process.env.TURBOSEARCH_CHUNK_OVERLAP_TOKENS ?? 100),
     turboBits: Number(process.env.TURBOSEARCH_TURBO_BITS ?? 4),
@@ -120,8 +135,15 @@ function parseOcrMode(value: string | undefined): OcrMode {
 }
 
 function parseEmbeddingProvider(value: string | undefined): EmbeddingProviderName {
+  if (value === "openai-compatible") return "openai-compatible";
   if (value === "openai") return "openai";
   return "hash";
+}
+
+function parseCompatibleEmbeddingAuth(value: string | undefined): AppConfig["compatibleEmbeddingAuth"] {
+  if (value === "bearer") return "bearer";
+  if (value === "sagemaker") return "sagemaker";
+  return "none";
 }
 
 function parsePdfParser(value: string | undefined): PdfParserName {

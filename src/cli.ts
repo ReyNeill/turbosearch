@@ -163,6 +163,14 @@ function configFromArgs(args: ParsedArgs, payload: JsonPayload): AppConfig {
     postgresUsePgvector: parseBoolean(getValue(args.flags["postgres-pgvector"], payload.postgresPgvector) ?? process.env.TURBOSEARCH_POSTGRES_PGVECTOR, true),
     postgresVectorIndex: parseBoolean(getValue(args.flags["postgres-vector-index"], payload.postgresVectorIndex) ?? process.env.TURBOSEARCH_POSTGRES_VECTOR_INDEX, true),
     embeddingProvider: parseEmbeddingProvider(getValue(args.flags.embedding, payload.embedding)),
+    compatibleEmbeddingBaseUrl: getString(payload, "embeddingBaseUrl") ?? String(args.flags["embedding-base-url"] ?? process.env.TURBOSEARCH_EMBEDDING_BASE_URL ?? "http://127.0.0.1:8000/v1"),
+    compatibleEmbeddingApiKey: getString(payload, "embeddingApiKey") ?? process.env.TURBOSEARCH_EMBEDDING_API_KEY ?? "",
+    compatibleEmbeddingModel: getString(payload, "embeddingModel") ?? String(args.flags["embedding-model"] ?? process.env.TURBOSEARCH_EMBEDDING_MODEL ?? "unsloth/Qwen3-Embedding-4B"),
+    compatibleEmbeddingQueryInstruction: getString(payload, "embeddingQueryInstruction") ?? String(args.flags["embedding-query-instruction"] ?? process.env.TURBOSEARCH_EMBEDDING_QUERY_INSTRUCTION ?? "Given a question about Silixon's organizational knowledge, retrieve the most relevant passages that answer it"),
+    compatibleEmbeddingAuth: parseEmbeddingAuth(getValue(args.flags["embedding-auth"], payload.embeddingAuth) ?? process.env.TURBOSEARCH_EMBEDDING_AUTH),
+    awsRegion: getString(payload, "awsRegion") ?? String(args.flags["aws-region"] ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "eu-west-2"),
+    awsProfile: getString(payload, "awsProfile") ?? String(args.flags["aws-profile"] ?? process.env.AWS_PROFILE ?? ""),
+    embeddingDimensions: getNumber(payload, "embeddingDimensions") ?? Number(args.flags["embedding-dimensions"] ?? process.env.TURBOSEARCH_EMBEDDING_DIMENSIONS ?? 1024),
     pdfParser: parsePdfParser(
       getValue(args.flags["pdf-parser"], payload.pdfParser) ?? process.env.TURBOSEARCH_PDF_PARSER
     ),
@@ -225,9 +233,17 @@ function parseOcrProvider(value: string | boolean | undefined): AppConfig["ocrPr
 }
 
 function parseEmbeddingProvider(value: string | boolean | undefined): EmbeddingProviderName {
+  if (value === "openai-compatible") return "openai-compatible";
   if (value === "openai") return "openai";
   if (value === "hash" || value === undefined || value === false) return "hash";
   throw new Error(`Unsupported embedding provider: ${String(value)}`);
+}
+
+function parseEmbeddingAuth(value: string | boolean | undefined): AppConfig["compatibleEmbeddingAuth"] {
+  if (value === "bearer") return "bearer";
+  if (value === "sagemaker") return "sagemaker";
+  if (value === "none" || value === undefined || value === false) return "none";
+  throw new Error(`Unsupported embedding auth: ${String(value)}`);
 }
 
 function parsePdfParser(value: string | boolean | undefined): PdfParserName {
@@ -307,7 +323,14 @@ JSON mode:
   bun run src/cli.ts extract --json '{"paths":["image.png","video.mp4"]}'
 
 Options:
-  --embedding      hash by default; openai requires OPENAI_API_KEY in .env.local
+  --embedding      hash, openai, or openai-compatible
+  --embedding-base-url
+                   OpenAI-compatible base URL, default http://127.0.0.1:8000/v1
+  --embedding-model
+                   Model name, default unsloth/Qwen3-Embedding-4B
+  --embedding-dimensions
+                   Matryoshka output size, default 1024
+  --embedding-auth none, bearer, or sagemaker; sagemaker uses short-lived IAM tokens
   --storage        sqlite by default; postgres requires TURBOSEARCH_POSTGRES_URL
   --postgres-url   Postgres connection URL for --storage postgres
   --postgres-psql-bm25s

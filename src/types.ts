@@ -1,4 +1,4 @@
-export type EmbeddingProviderName = "hash" | "openai";
+export type EmbeddingProviderName = "hash" | "openai" | "openai-compatible";
 export type StorageProviderName = "sqlite" | "postgres";
 export type SearchBackendName = "exact" | "turbo" | "bm25" | "hybrid";
 export type OcrProviderName = "none" | "ollama-glm-ocr" | "vllm-glm-ocr";
