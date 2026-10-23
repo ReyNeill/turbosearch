@@ -35,9 +35,32 @@ TURBOSEARCH_EMBEDDING_AUTH=none
 bun run src/cli.ts ingest ./client-data --embedding openai-compatible
 ```
 
-Documents are embedded without a prompt. Queries use Qwen's required
+Each model family expects its own query and document prompts; choose them with
+`TURBOSEARCH_EMBEDDING_PROMPTS` (`--embedding-prompts`). The default, `qwen3`,
+embeds documents without a prompt and wraps queries in Qwen's required
 `Instruct: ...\nQuery:...` format. Override the task sentence with
-`TURBOSEARCH_EMBEDDING_QUERY_INSTRUCTION` for a different corpus.
+`TURBOSEARCH_EMBEDDING_QUERY_INSTRUCTION` for a different corpus. `none` sends
+text as is.
+
+The smaller Apache-2.0 `google/embeddinggemma-2` (270M parameters for text,
+768 dimensions, Matryoshka 512/256/128, 8K context) runs on llama.cpp's
+`llama-server` (b11836 or newer) on a laptop CPU or GPU. Its `embeddinggemma`
+prompts are `task: search result | query: ...` for queries and
+`title: ... | text: ...` for documents; org-brain entries pass their title.
+
+```bash
+llama-server --model embeddinggemma-2-Q8_0.gguf --embedding \
+  --ctx-size 8192 --batch-size 8192 --ubatch-size 8192 --port 8091
+TURBOSEARCH_EMBEDDING_PROVIDER=openai-compatible
+TURBOSEARCH_EMBEDDING_BASE_URL=http://127.0.0.1:8091/v1
+TURBOSEARCH_EMBEDDING_MODEL=google/embeddinggemma-2
+TURBOSEARCH_EMBEDDING_PROMPTS=embeddinggemma
+TURBOSEARCH_EMBEDDING_DIMENSIONS=768
+```
+
+The GGUF files are in `ggml-org/embeddinggemma-2-GGUF` on Hugging Face. Add
+`--mmproj mmproj-embeddinggemma-2-Q8_0.gguf` to embed images too (see image
+embeddings below).
 
 For SageMaker, use a base URL ending in `/openai/v1` and set
 `TURBOSEARCH_EMBEDDING_AUTH=sagemaker`. TurboSearch resolves the configured AWS
@@ -51,12 +74,13 @@ each request; it never stores or logs the token.
 - Image OCR through GLM-OCR, with sidecar fallback.
 - Audio/video transcription through Cohere Transcribe or a vLLM-compatible endpoint.
 - Video frame OCR with fixed-interval frame sampling and GLM-OCR.
+- Optional direct image and video-frame embeddings on a multimodal embedding server.
 - SQLite chunk store with source metadata.
 - SQLite FTS5 BM25 lexical search.
 - Exact cosine search.
-- Compressed TurboQuant-style candidate search with exact reranking.
+- Compressed TurboQuant-style candidate search with exact reranking, 1 to 8 bits per dimension.
 - Hybrid vector + BM25 search with reciprocal-rank fusion.
-- Optional Postgres storage mode for production corpora, with pgvector-backed vector search and psql_bm25s-backed BM25/hybrid fusion.
+- Optional Postgres storage mode for production corpora, with pgvector-backed vector search, binary-quantized candidate search, and psql_bm25s-backed BM25/hybrid fusion.
 - CLI JSON mode for agent calls.
 - JSON Lines ingestion events for streaming progress.
 
@@ -111,10 +135,10 @@ TurboSearch indexes only real extracted evidence. It does not index filenames as
 | Text/code/JSON/CSV/YAML/HTML | Good | Raw text chunks | Format-aware table chunking is still future work. |
 | PDF with embedded text | Good | Page text | LiteParse first, then `pdftotext`. |
 | Scanned/sparse PDF | Good | Per-page OCR text | Uses GLM-OCR after text parsers are sparse; capped by `TURBOSEARCH_PDF_OCR_MAX_PAGES`. |
-| Images | Good | OCR text | Uses GLM-OCR, or sidecar fallback. |
+| Images | Good | OCR text; optionally the image itself | Uses GLM-OCR, or sidecar fallback. Image embeddings are opt-in. |
 | Audio | Good | Transcript text; timestamped segment evidence when provider returns real segments | Cohere Transcribe currently returns text only, without timestamps. |
 | Video audio | Good | Transcript text; timestamped segment evidence when provider returns real segments | Uses `ffmpeg` to extract WAV before transcription. |
-| Video frames | Good | OCR text with sampled frame path and timestamp | Fixed interval sampling, capped by max frames. |
+| Video frames | Good | OCR text and optionally the frame itself, with sampled frame path and timestamp | Fixed interval sampling, capped by max frames. |
 | DOCX/PPTX/XLSX | Missing | None | Next practical format family to add. |
 
 Sidecars are still supported as fallback evidence:
@@ -151,6 +175,15 @@ TURBOSEARCH_VIDEO_FRAME_OCR_INTERVAL_SECONDS=30
 TURBOSEARCH_VIDEO_FRAME_OCR_MAX_FRAMES=60
 ```
 
+Image embeddings put pictures in the same vector space as text queries, for
+what OCR cannot read: schematics, board photos, diagrams, slides. Turn them on
+with `TURBOSEARCH_IMAGE_EMBEDDINGS=true` (`--image-embeddings true`) and an
+openai-compatible multimodal server, such as `llama-server` with EmbeddingGemma 2
+and its `--mmproj` file. Each image, and each sampled video frame, becomes one
+textless chunk with modality `image_visual` or `video_frame_visual` next to its
+OCR text. PNG and JPEG are sent as is; other formats are converted to PNG with
+`ffmpeg`. Frames use the video frame sampling settings below.
+
 TurboQuant belongs in the vector backend, not in ingestion. The retrieval quality will mostly come from chunking, multimodal extraction, metadata filters, and reranking.
 
 ## Storage And Retrieval Backends
@@ -173,7 +206,10 @@ bun run src/cli.ts ingest ./client-data --storage postgres
 bun run src/cli.ts search "contract renewal terms" --storage postgres --backend hybrid
 ```
 
-Postgres `exact` uses pgvector cosine ordering. Postgres `hybrid` fuses pgvector candidates with `psql_bm25s` candidates in SQL, so production search does not need to pull every chunk into the app process. SQLite keeps the same backend names but uses local FTS5 plus in-process vector scoring.
+Postgres `exact` uses pgvector cosine ordering. Postgres `turbo` takes
+candidates from an HNSW index over `binary_quantize(embedding)` (1 bit per
+dimension, Hamming distance) and rescores them against the full vectors; it needs
+pgvector 0.7 or newer. Postgres `hybrid` fuses pgvector candidates with `psql_bm25s` candidates in SQL, so production search does not need to pull every chunk into the app process. SQLite keeps the same backend names but uses local FTS5 plus in-process vector scoring.
 
 For local production-mode testing, Docker can start a disposable PostgreSQL 18 database with both extensions:
 
@@ -188,6 +224,10 @@ bun run postgres:down
 Retrieval backends:
 
 - `exact`: exact cosine over stored embeddings.
-- `turbo`: TurboQuant candidate search with exact reranking.
+- `turbo`: TurboQuant candidate search with exact reranking. `--turbo-bits`
+  (default 4) sets the code width; 1, 2, 4 and 8 bits score through one table
+  lookup per code byte. Codes are written at ingest, so changing the width means
+  re-ingesting. `--turbo-rerank` (default 80) sets how many candidates are
+  rescored exactly.
 - `bm25`: lexical BM25 over chunk text.
 - `hybrid`: vector + BM25 reciprocal-rank fusion.

@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { OpenAiCompatibleEmbeddingProvider } from "../src/embeddings/openai-compatible.ts";
 
@@ -6,6 +9,7 @@ test("adds the Qwen query instruction only to queries and requests Matryoshka di
   const provider = new OpenAiCompatibleEmbeddingProvider({
     baseUrl: "http://embedding.internal/v1/",
     model: "unsloth/Qwen3-Embedding-4B",
+    promptFormat: "qwen3",
     queryInstruction: "Retrieve passages that answer the org question",
     dimensions: 3,
     fetch: mockFetch(requests, [
@@ -14,8 +18,11 @@ test("adds the Qwen query instruction only to queries and requests Matryoshka di
     ])
   });
 
-  const query = await provider.embedText("How do releases work?");
-  const documents = await provider.embedTexts(["Document A", "Document B"]);
+  const query = await provider.embedQuery("How do releases work?");
+  const documents = await provider.embedDocuments([
+    { kind: "text", text: "Document A" },
+    { kind: "text", text: "Document B" }
+  ]);
 
   expect(requests[0]?.input).toEqual([
     "Instruct: Retrieve passages that answer the org question\nQuery:How do releases work?"
@@ -30,6 +37,7 @@ test("orders indexed responses and rejects incomplete vectors", async () => {
   const provider = new OpenAiCompatibleEmbeddingProvider({
     baseUrl: "http://embedding.internal/v1",
     model: "unsloth/Qwen3-Embedding-4B",
+    promptFormat: "qwen3",
     queryInstruction: "",
     dimensions: 32,
     fetch: mockFetch([], [
@@ -37,9 +45,41 @@ test("orders indexed responses and rejects incomplete vectors", async () => {
       { index: 0, embedding: unitVector(32, 0) }
     ])
   });
-  const vectors = await provider.embedTexts(["first", "second"]);
+  const vectors = await provider.embedDocuments([{ kind: "text", text: "first" }, { kind: "text", text: "second" }]);
   expect(vectors[0]?.[0]).toBe(1);
   expect(vectors[1]?.[1]).toBe(1);
+});
+
+test("uses EmbeddingGemma prompts and sends images as unprompted content arrays", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const provider = new OpenAiCompatibleEmbeddingProvider({
+    baseUrl: "http://embedding.internal/v1",
+    model: "google/embeddinggemma-2",
+    promptFormat: "embeddinggemma",
+    queryInstruction: "ignored by EmbeddingGemma",
+    dimensions: 2,
+    fetch: mockFetch(requests, [
+      { index: 0, embedding: [1, 0] },
+      { index: 1, embedding: [1, 0] },
+      { index: 2, embedding: [0, 1] }
+    ])
+  });
+  const imagePath = join(mkdtempSync(join(tmpdir(), "turbosearch-image-")), "board.png");
+  writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+  await provider.embedQuery("How do releases work?");
+  await provider.embedDocuments([
+    { kind: "text", text: "Merge dev into prod.", title: "Release policy" },
+    { kind: "text", text: "Untitled note" },
+    { kind: "image", path: imagePath }
+  ]);
+
+  expect(requests[0]?.input).toEqual(["task: search result | query: How do releases work?"]);
+  expect(requests[1]?.input).toEqual([
+    "title: Release policy | text: Merge dev into prod.",
+    "title: none | text: Untitled note",
+    { content: [{ type: "image_url", image_url: { url: "data:image/png;base64,iVBORw==" } }] }
+  ]);
 });
 
 function mockFetch(

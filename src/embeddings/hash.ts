@@ -1,18 +1,20 @@
-import type { EmbeddingProvider } from "./provider.ts";
+import { textDocuments, type EmbeddingDocument, type EmbeddingProvider } from "./provider.ts";
+import { formatDocument } from "./prompts.ts";
 import { hashToUint32 } from "../utils/hash.ts";
 import { l2Normalize } from "../vector/math.ts";
 
 export class HashEmbeddingProvider implements EmbeddingProvider {
   readonly name = "hash" as const;
+  readonly supportsImages = false;
 
   constructor(readonly dimensions: number) {}
 
-  async embedText(text: string): Promise<Float32Array> {
-    return this.embed(text);
+  async embedQuery(query: string): Promise<Float32Array> {
+    return this.embed(query);
   }
 
-  async embedTexts(texts: string[]): Promise<Float32Array[]> {
-    return texts.map((text) => this.embed(text));
+  async embedDocuments(documents: EmbeddingDocument[]): Promise<Float32Array[]> {
+    return textDocuments(this.name, documents).map((document) => this.embed(formatDocument("none", document)));
   }
 
   private embed(text: string): Float32Array {

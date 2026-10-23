@@ -29,7 +29,7 @@ test("org-brain adapter creates lifecycle metadata and line citations", () => {
   expect(metadata.heading).toBe("Decision");
   expect(metadata.lineStart).toBeGreaterThan(1);
   expect(metadata.lineEnd).toBeGreaterThanOrEqual(metadata.lineStart as number);
-  expect(parsed.chunks[0]?.metadata.embeddingText).toContain("Release policy");
+  expect(parsed.chunks[0]?.metadata.embeddingTitle).toBe("Release policy");
 });
 
 test("org-brain result shaping keeps the best chunk per entry", () => {

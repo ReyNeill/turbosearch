@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
+  EmbeddingPromptFormat,
   EmbeddingProviderName,
   OcrMode,
   OcrProviderName,
@@ -22,6 +23,7 @@ export type AppConfig = {
   compatibleEmbeddingBaseUrl: string;
   compatibleEmbeddingApiKey: string;
   compatibleEmbeddingModel: string;
+  compatibleEmbeddingPromptFormat: EmbeddingPromptFormat;
   compatibleEmbeddingQueryInstruction: string;
   compatibleEmbeddingAuth: "none" | "bearer" | "sagemaker";
   awsRegion: string;
@@ -52,6 +54,9 @@ export type AppConfig = {
   videoFrameOcr: boolean;
   videoFrameOcrIntervalSeconds: number;
   videoFrameOcrMaxFrames: number;
+  // Embed images and sampled video frames directly, next to their OCR text. Needs a multimodal
+  // openai-compatible endpoint such as llama-server with --mmproj.
+  imageEmbeddings: boolean;
 };
 
 export function loadEnvLocal(cwd = process.cwd()): void {
@@ -87,6 +92,7 @@ export function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     compatibleEmbeddingBaseUrl: process.env.TURBOSEARCH_EMBEDDING_BASE_URL ?? "http://127.0.0.1:8000/v1",
     compatibleEmbeddingApiKey: process.env.TURBOSEARCH_EMBEDDING_API_KEY ?? "",
     compatibleEmbeddingModel: process.env.TURBOSEARCH_EMBEDDING_MODEL ?? "unsloth/Qwen3-Embedding-4B",
+    compatibleEmbeddingPromptFormat: parseEmbeddingPromptFormat(process.env.TURBOSEARCH_EMBEDDING_PROMPTS),
     compatibleEmbeddingQueryInstruction: process.env.TURBOSEARCH_EMBEDDING_QUERY_INSTRUCTION
       ?? "Given a question about Silixon's organizational knowledge, retrieve the most relevant passages that answer it",
     compatibleEmbeddingAuth: parseCompatibleEmbeddingAuth(process.env.TURBOSEARCH_EMBEDDING_AUTH),
@@ -118,8 +124,16 @@ export function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     videoFrameOcr: parseBoolean(process.env.TURBOSEARCH_VIDEO_FRAME_OCR, true),
     videoFrameOcrIntervalSeconds: Number(process.env.TURBOSEARCH_VIDEO_FRAME_OCR_INTERVAL_SECONDS ?? 30),
     videoFrameOcrMaxFrames: Number(process.env.TURBOSEARCH_VIDEO_FRAME_OCR_MAX_FRAMES ?? 60),
+    imageEmbeddings: parseBoolean(process.env.TURBOSEARCH_IMAGE_EMBEDDINGS, false),
     ...overrides
   };
+}
+
+export function parseEmbeddingPromptFormat(value: string | boolean | undefined): EmbeddingPromptFormat {
+  if (value === "embeddinggemma") return "embeddinggemma";
+  if (value === "none") return "none";
+  if (value === "qwen3" || value === undefined || value === false) return "qwen3";
+  throw new Error(`Unsupported embedding prompt format: ${String(value)}`);
 }
 
 function parseStorageProvider(value: string | undefined): StorageProviderName {

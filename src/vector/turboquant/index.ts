@@ -14,6 +14,14 @@ export type TurboQuantEncoded = {
   norm: number;
 };
 
+// A rotated query plus, for bit widths that pack whole codes into a byte (1, 2, 4, 8), one
+// 256-entry table per code byte holding that byte's partial dot product. Scoring then costs
+// one lookup per byte instead of one unpack and multiply per dimension.
+export type TurboQuantQuery = {
+  rotated: Float32Array;
+  byteTable: Float32Array | null;
+};
+
 export class TurboQuantCodec {
   readonly bits: number;
   readonly rotatedDimension: number;
@@ -43,18 +51,46 @@ export class TurboQuantCodec {
     };
   }
 
-  prepareQuery(query: Float32Array): Float32Array {
-    return rotateVector(l2Normalize(query), this.rotation);
+  prepareQuery(query: Float32Array): TurboQuantQuery {
+    const rotated = rotateVector(l2Normalize(query), this.rotation);
+    return { rotated, byteTable: 8 % this.bits === 0 ? this.byteTable(rotated) : null };
   }
 
-  scorePreparedQuery(rotatedQuery: Float32Array, encoded: TurboQuantEncoded): number {
+  scorePreparedQuery(query: TurboQuantQuery, encoded: TurboQuantEncoded): number {
+    const table = query.byteTable;
     let score = 0;
 
-    for (let i = 0; i < this.rotatedDimension; i += 1) {
-      const code = getPackedCode(encoded.code, i, this.bits);
-      score += (rotatedQuery[i] ?? 0) * (this.codebook.centroids[code] ?? 0);
+    if (table) {
+      for (let byte = 0; byte < encoded.code.length; byte += 1) {
+        score += table[byte * 256 + (encoded.code[byte] ?? 0)] ?? 0;
+      }
+    } else {
+      for (let i = 0; i < this.rotatedDimension; i += 1) {
+        const code = getPackedCode(encoded.code, i, this.bits);
+        score += (query.rotated[i] ?? 0) * (this.codebook.centroids[code] ?? 0);
+      }
     }
 
     return score * encoded.norm;
+  }
+
+  private byteTable(rotated: Float32Array): Float32Array {
+    const codesPerByte = 8 / this.bits;
+    const mask = (1 << this.bits) - 1;
+    const bytes = Math.ceil(this.rotatedDimension / codesPerByte);
+    const table = new Float32Array(bytes * 256);
+
+    for (let byte = 0; byte < bytes; byte += 1) {
+      for (let value = 0; value < 256; value += 1) {
+        let sum = 0;
+        for (let slot = 0; slot < codesPerByte; slot += 1) {
+          const code = (value >> (slot * this.bits)) & mask;
+          sum += (rotated[byte * codesPerByte + slot] ?? 0) * (this.codebook.centroids[code] ?? 0);
+        }
+        table[byte * 256 + value] = sum;
+      }
+    }
+
+    return table;
   }
 }

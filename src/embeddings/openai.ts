@@ -1,4 +1,5 @@
-import type { EmbeddingProvider } from "./provider.ts";
+import { textDocuments, type EmbeddingDocument, type EmbeddingProvider } from "./provider.ts";
+import { formatDocument } from "./prompts.ts";
 import { l2Normalize } from "../vector/math.ts";
 
 type OpenAiEmbeddingOptions = {
@@ -12,6 +13,7 @@ type OpenAiEmbeddingResponse = {
 
 export class OpenAiEmbeddingProvider implements EmbeddingProvider {
   readonly name = "openai" as const;
+  readonly supportsImages = false;
   readonly dimensions: number;
   private readonly model: string;
 
@@ -20,13 +22,17 @@ export class OpenAiEmbeddingProvider implements EmbeddingProvider {
     this.dimensions = options.dimensions;
   }
 
-  async embedText(text: string): Promise<Float32Array> {
-    const [embedding] = await this.embedTexts([text]);
+  async embedQuery(query: string): Promise<Float32Array> {
+    const [embedding] = await this.embedTexts([query]);
     if (!embedding) throw new Error("OpenAI returned no embedding.");
     return embedding;
   }
 
-  async embedTexts(texts: string[]): Promise<Float32Array[]> {
+  async embedDocuments(documents: EmbeddingDocument[]): Promise<Float32Array[]> {
+    return this.embedTexts(textDocuments(this.name, documents).map((document) => formatDocument("none", document)));
+  }
+
+  private async embedTexts(texts: string[]): Promise<Float32Array[]> {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       throw new Error("OPENAI_API_KEY is required when using --embedding openai.");

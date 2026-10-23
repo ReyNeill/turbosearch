@@ -1,5 +1,9 @@
+import { readFile } from "node:fs/promises";
+import { extname } from "node:path";
+import type { EmbeddingPromptFormat } from "../types.ts";
 import { l2Normalize } from "../vector/math.ts";
-import type { EmbeddingProvider } from "./provider.ts";
+import type { EmbeddingDocument, EmbeddingProvider } from "./provider.ts";
+import { formatDocument, formatQuery } from "./prompts.ts";
 import { createSageMakerBearerToken } from "./sagemaker-token.ts";
 
 type CompatibleEmbeddingOptions = {
@@ -9,6 +13,7 @@ type CompatibleEmbeddingOptions = {
   awsRegion?: string;
   awsProfile?: string;
   model: string;
+  promptFormat: EmbeddingPromptFormat;
   queryInstruction: string;
   dimensions: number;
   fetch?: typeof fetch;
@@ -18,8 +23,22 @@ type CompatibleEmbeddingResponse = {
   data?: Array<{ index?: number; embedding?: number[] }>;
 };
 
+// One /embeddings input: a plain string, or the OpenAI-style content array that multimodal
+// servers (llama-server with --mmproj) read images from.
+type CompatibleEmbeddingInput =
+  | string
+  | { content: Array<{ type: "image_url"; image_url: { url: string } }> };
+
+const imageMimeTypes: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg"
+};
+
 export class OpenAiCompatibleEmbeddingProvider implements EmbeddingProvider {
   readonly name = "openai-compatible" as const;
+  // The server decides; a text-only server rejects the request with its own error.
+  readonly supportsImages = true;
   readonly dimensions: number;
   private readonly options: CompatibleEmbeddingOptions;
   private readonly request: typeof fetch;
@@ -33,21 +52,29 @@ export class OpenAiCompatibleEmbeddingProvider implements EmbeddingProvider {
     this.request = options.fetch ?? fetch;
   }
 
-  async embedText(text: string): Promise<Float32Array> {
-    const query = this.options.queryInstruction.trim()
-      ? `Instruct: ${this.options.queryInstruction.trim()}\nQuery:${text}`
-      : text;
-    const [embedding] = await this.embed([query]);
+  async embedQuery(query: string): Promise<Float32Array> {
+    const [embedding] = await this.embed([
+      formatQuery(this.options.promptFormat, query, this.options.queryInstruction)
+    ]);
     if (!embedding) throw new Error("The embedding service returned no query embedding.");
     return embedding;
   }
 
-  async embedTexts(texts: string[]): Promise<Float32Array[]> {
-    return this.embed(texts);
+  async embedDocuments(documents: EmbeddingDocument[]): Promise<Float32Array[]> {
+    return this.embed(await Promise.all(documents.map((document) => this.input(document))));
   }
 
-  private async embed(texts: string[]): Promise<Float32Array[]> {
-    if (texts.length === 0) return [];
+  private async input(document: EmbeddingDocument): Promise<CompatibleEmbeddingInput> {
+    if (document.kind === "text") return formatDocument(this.options.promptFormat, document);
+    const mimeType = imageMimeTypes[extname(document.path).toLowerCase()];
+    if (!mimeType) throw new Error(`Image embeddings need a PNG or JPEG file: ${document.path}`);
+    const data = (await readFile(document.path)).toString("base64");
+    // Images carry no prompt: EmbeddingGemma documents its task prefixes for text only.
+    return { content: [{ type: "image_url", image_url: { url: `data:${mimeType};base64,${data}` } }] };
+  }
+
+  private async embed(inputs: CompatibleEmbeddingInput[]): Promise<Float32Array[]> {
+    if (inputs.length === 0) return [];
     const token = await this.bearerToken();
     const response = await this.request(`${this.options.baseUrl.replace(/\/$/, "")}/embeddings`, {
       method: "POST",
@@ -57,7 +84,7 @@ export class OpenAiCompatibleEmbeddingProvider implements EmbeddingProvider {
       },
       body: JSON.stringify({
         model: this.options.model,
-        input: texts,
+        input: inputs,
         dimensions: this.dimensions,
         encoding_format: "float"
       })
@@ -69,8 +96,8 @@ export class OpenAiCompatibleEmbeddingProvider implements EmbeddingProvider {
     }
 
     const json = await response.json() as CompatibleEmbeddingResponse;
-    if (!Array.isArray(json.data) || json.data.length !== texts.length) {
-      throw new Error(`Embedding service returned ${json.data?.length ?? 0} vectors for ${texts.length} inputs.`);
+    if (!Array.isArray(json.data) || json.data.length !== inputs.length) {
+      throw new Error(`Embedding service returned ${json.data?.length ?? 0} vectors for ${inputs.length} inputs.`);
     }
     return json.data
       .map((item, responseIndex) => ({ item, responseIndex }))

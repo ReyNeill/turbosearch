@@ -242,6 +242,45 @@ export class PostgresSearchDatabase implements SearchStorage {
     }));
   }
 
+  // pgvector binary quantization: the HNSW index over binary_quantize(embedding) finds candidates by
+  // Hamming distance, and the full-precision vectors rescore them. The expression must match the index.
+  async searchCompressed(queryVector: Float32Array, k: number, candidateLimit: number): Promise<VectorSearchResult[]> {
+    await this.ready;
+    const dimension = this.options.embeddingDimensions;
+    const vectorLiteral = toVectorLiteral(queryVector);
+    const rows = await this.sql.unsafe<PostgresVectorChunkRow[]>(`
+      WITH candidates AS (
+        SELECT id
+        FROM turbosearch_chunks
+        ORDER BY binary_quantize(embedding)::bit(${dimension}) <~> binary_quantize($1::vector)::bit(${dimension})
+        LIMIT $2
+      )
+      SELECT
+        turbosearch_chunks.id,
+        turbosearch_chunks.document_id,
+        turbosearch_documents.path AS document_path,
+        turbosearch_chunks.ordinal,
+        turbosearch_chunks.content AS text,
+        turbosearch_chunks.start_offset,
+        turbosearch_chunks.end_offset,
+        turbosearch_chunks.metadata_json,
+        turbosearch_chunks.embedding::text AS embedding,
+        turbosearch_chunks.turbo_code,
+        turbosearch_chunks.turbo_norm,
+        1 - (turbosearch_chunks.embedding <=> $1::vector) AS vector_score
+      FROM candidates
+      INNER JOIN turbosearch_chunks ON turbosearch_chunks.id = candidates.id
+      INNER JOIN turbosearch_documents ON turbosearch_documents.id = turbosearch_chunks.document_id
+      ORDER BY turbosearch_chunks.embedding <=> $1::vector
+      LIMIT $3
+    `, [vectorLiteral, Math.max(k, candidateLimit), k]);
+
+    return rows.map((row) => ({
+      chunk: rowToStoredChunk(row),
+      score: Number(row.vector_score)
+    }));
+  }
+
   async searchHybrid(
     query: string,
     queryVector: Float32Array,
@@ -370,6 +409,11 @@ export class PostgresSearchDatabase implements SearchStorage {
       await this.sql.unsafe(`
         CREATE INDEX IF NOT EXISTS turbosearch_chunks_embedding_hnsw_idx
         ON turbosearch_chunks USING hnsw (embedding vector_cosine_ops)
+      `);
+      // 1 bit per dimension (32x smaller than the float vectors) for searchCompressed.
+      await this.sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS turbosearch_chunks_embedding_bit_hnsw_idx
+        ON turbosearch_chunks USING hnsw ((binary_quantize(embedding)::bit(${dimension})) bit_hamming_ops)
       `);
     }
 

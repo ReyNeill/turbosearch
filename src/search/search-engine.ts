@@ -1,8 +1,8 @@
 import type { AppConfig } from "../config.ts";
 import { chunkDocument } from "../chunking/chunker.ts";
 import { collectOrgBrainEntryPaths, loadOrgBrainDocument } from "../corpora/org-brain.ts";
-import type { EmbeddingProvider } from "../embeddings/provider.ts";
-import { extractEvidence } from "../ingest/extractors.ts";
+import type { EmbeddingDocument, EmbeddingProvider } from "../embeddings/provider.ts";
+import { extractEvidence, extractionOptions } from "../ingest/extractors.ts";
 import { createOcrProvider, type OcrProvider } from "../ocr/provider.ts";
 import { createSearchStorage, type SearchStorage } from "../storage/database.ts";
 import type { LexicalSearchResult } from "../storage/types.ts";
@@ -33,6 +33,11 @@ export class SearchEngine {
     private readonly config: AppConfig,
     private readonly embeddings: EmbeddingProvider
   ) {
+    if (config.imageEmbeddings && !embeddings.supportsImages) {
+      throw new Error(
+        "TURBOSEARCH_IMAGE_EMBEDDINGS needs --embedding openai-compatible on a multimodal server (llama-server with --mmproj)."
+      );
+    }
     this.database = createSearchStorage(config);
     this.turbo = new TurboQuantCodec({
       dimension: embeddings.dimensions,
@@ -56,13 +61,7 @@ export class SearchEngine {
         file,
         this.ocrProvider,
         this.transcriptionProvider,
-        {
-          pdfParser: this.config.pdfParser,
-          pdfOcrMaxPages: this.config.pdfOcrMaxPages,
-          videoFrameOcr: this.config.videoFrameOcr,
-          videoFrameOcrIntervalSeconds: this.config.videoFrameOcrIntervalSeconds,
-          videoFrameOcrMaxFrames: this.config.videoFrameOcrMaxFrames
-        }
+        extractionOptions(this.config)
       );
       summary.pendingExtractions += extraction.pending.length;
       for (const pending of extraction.pending) {
@@ -96,7 +95,7 @@ export class SearchEngine {
         continue;
       }
 
-      const vectors = await this.embeddings.embedTexts(chunks.map(chunkEmbeddingText));
+      const vectors = await this.embeddings.embedDocuments(chunks.map(chunkEmbeddingDocument));
       const turboVectors = vectors.map((vector) => this.turbo.encode(vector));
       await this.database.replaceDocument(document, chunks, vectors, turboVectors);
 
@@ -135,7 +134,7 @@ export class SearchEngine {
         continue;
       }
 
-      const vectors = await this.embeddings.embedTexts(parsed.chunks.map(chunkEmbeddingText));
+      const vectors = await this.embeddings.embedDocuments(parsed.chunks.map(chunkEmbeddingDocument));
       const turboVectors = vectors.map((vector) => this.turbo.encode(vector));
       await this.database.replaceDocument(parsed.document, parsed.chunks, vectors, turboVectors);
       summary.documents += 1;
@@ -166,7 +165,7 @@ export class SearchEngine {
           .map(({ chunk, score }) => toSearchResult(chunk, score));
       }
 
-      const queryVector = await this.embeddings.embedText(query);
+      const queryVector = await this.embeddings.embedQuery(query);
       if (backend === "hybrid") {
         const lexical = (await this.database.searchLexical(query, Math.max(k, chunks.length)))
           .filter(({ chunk }) => chunkMatchesFilters(chunk, filters));
@@ -180,7 +179,7 @@ export class SearchEngine {
       return (await this.database.searchLexical(query, k)).map(({ chunk, score }) => toSearchResult(chunk, score));
     }
 
-    const queryVector = await this.embeddings.embedText(query);
+    const queryVector = await this.embeddings.embedQuery(query);
 
     if (backend === "hybrid") {
       if (this.database.searchHybrid) {
@@ -201,6 +200,11 @@ export class SearchEngine {
 
     if (backend === "exact" && this.database.searchVector) {
       return (await this.database.searchVector(queryVector, k)).map(({ chunk, score }) => toSearchResult(chunk, score));
+    }
+
+    if (backend === "turbo" && this.database.searchCompressed) {
+      return (await this.database.searchCompressed(queryVector, k, this.config.turboRerankLimit))
+        .map(({ chunk, score }) => toSearchResult(chunk, score));
     }
 
     const chunks = await this.database.getAllChunks();
@@ -302,17 +306,32 @@ function chunkExtraction(evidenceItems: ExtractedEvidence[], settings: ChunkSett
   const chunks: TextChunk[] = [];
 
   for (const evidence of evidenceItems) {
+    const metadata = {
+      evidence: {
+        modality: evidence.modality,
+        locator: evidence.locator,
+        metadata: evidence.metadata
+      }
+    };
+
+    // Visual evidence is one textless chunk whose vector comes from the image itself.
+    if (evidence.imagePath) {
+      chunks.push({
+        documentPath: evidence.sourcePath,
+        ordinal: chunks.length,
+        text: "",
+        startOffset: 0,
+        endOffset: 0,
+        metadata: { ...metadata, sourceKind: evidence.sourceKind, embeddingImage: evidence.imagePath }
+      });
+      continue;
+    }
+
     const evidenceDocument: ExtractedDocument = {
       path: evidence.sourcePath,
       kind: evidence.sourceKind,
       text: evidence.text,
-      metadata: {
-        evidence: {
-          modality: evidence.modality,
-          locator: evidence.locator,
-          metadata: evidence.metadata
-        }
-      }
+      metadata
     };
 
     for (const chunk of chunkDocument(evidenceDocument, settings)) {
@@ -332,7 +351,7 @@ function toDocument(extraction: Awaited<ReturnType<typeof extractEvidence>>): Ex
   return {
     path: extraction.path,
     kind: extraction.kind,
-    text: extraction.evidence.map((evidence) => evidence.text).join("\n\n"),
+    text: extraction.evidence.map((evidence) => evidence.text).filter(Boolean).join("\n\n"),
     metadata: {
       evidenceCount: extraction.evidence.length,
       pendingExtractions: extraction.pending.length
@@ -341,7 +360,7 @@ function toDocument(extraction: Awaited<ReturnType<typeof extractEvidence>>): Ex
 }
 
 function toSearchResult(chunk: StoredChunk, score: number): SearchResult {
-  const { embeddingText: _embeddingText, ...metadata } = chunk.metadata;
+  const { embeddingText: _text, embeddingTitle: _title, embeddingImage: _image, ...metadata } = chunk.metadata;
   return {
     chunkId: chunk.id,
     documentPath: chunk.documentPath,
@@ -356,8 +375,14 @@ function toSearchResult(chunk: StoredChunk, score: number): SearchResult {
   };
 }
 
-function chunkEmbeddingText(chunk: TextChunk): string {
-  return typeof chunk.metadata.embeddingText === "string" ? chunk.metadata.embeddingText : chunk.text;
+function chunkEmbeddingDocument(chunk: TextChunk): EmbeddingDocument {
+  const { embeddingImage, embeddingText, embeddingTitle } = chunk.metadata;
+  if (typeof embeddingImage === "string") return { kind: "image", path: embeddingImage };
+  return {
+    kind: "text",
+    text: typeof embeddingText === "string" ? embeddingText : chunk.text,
+    title: typeof embeddingTitle === "string" ? embeddingTitle : undefined
+  };
 }
 
 function chunkMatchesFilters(chunk: StoredChunk, filters: SearchFilters): boolean {
