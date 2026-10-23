@@ -4,8 +4,8 @@ import { cosine } from "../src/vector/math.ts";
 
 test("hash embeddings are deterministic and normalized", async () => {
   const provider = new HashEmbeddingProvider(128);
-  const first = await provider.embedText("semantic search over private documents");
-  const second = await provider.embedText("semantic search over private documents");
+  const first = await provider.embedQuery("semantic search over private documents");
+  const second = await provider.embedQuery("semantic search over private documents");
 
   expect(cosine(first, second)).toBeGreaterThan(0.999);
 });

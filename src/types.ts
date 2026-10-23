@@ -1,4 +1,6 @@
 export type EmbeddingProviderName = "hash" | "openai" | "openai-compatible";
+// How the openai-compatible provider wraps queries and documents for its model family.
+export type EmbeddingPromptFormat = "qwen3" | "embeddinggemma" | "none";
 export type StorageProviderName = "sqlite" | "postgres";
 export type SearchBackendName = "exact" | "turbo" | "bm25" | "hybrid";
 export type OcrProviderName = "none" | "ollama-glm-ocr" | "vllm-glm-ocr";
@@ -15,7 +17,9 @@ export type EvidenceModality =
   | "image_ocr"
   | "audio_transcript"
   | "video_transcript"
-  | "video_frame_ocr";
+  | "video_frame_ocr"
+  | "image_visual"
+  | "video_frame_visual";
 
 export type EvidenceLocator = {
   page?: number;
@@ -30,6 +34,8 @@ export type ExtractedEvidence = {
   text: string;
   locator: EvidenceLocator;
   metadata: Record<string, unknown>;
+  // Visual evidence: the image (PNG or JPEG) embedded directly instead of text. Its text is empty.
+  imagePath?: string;
 };
 
 export type ExtractionPending = {
@@ -37,7 +43,7 @@ export type ExtractionPending = {
   sourceKind: SourceKind;
   pending: true;
   reason: string;
-  requiredExtractor: OcrProviderName | TranscriptionProviderName;
+  requiredExtractor: OcrProviderName | TranscriptionProviderName | "ffmpeg";
 };
 
 export type ExtractionResult = {

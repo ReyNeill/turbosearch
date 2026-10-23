@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { basename, join } from "node:path";
 import { LiteParse, type ParseResult, type ParsedPage } from "@llamaindex/liteparse";
+import type { AppConfig } from "../config.ts";
 import type {
   ExtractedDocument,
   ExtractedEvidence,
@@ -54,6 +55,7 @@ export type ExtractionOptions = {
   videoFrameOcr: boolean;
   videoFrameOcrIntervalSeconds: number;
   videoFrameOcrMaxFrames: number;
+  imageEmbeddings: boolean;
 };
 
 const defaultExtractionOptions: ExtractionOptions = {
@@ -61,8 +63,20 @@ const defaultExtractionOptions: ExtractionOptions = {
   pdfOcrMaxPages: 200,
   videoFrameOcr: true,
   videoFrameOcrIntervalSeconds: 30,
-  videoFrameOcrMaxFrames: 60
+  videoFrameOcrMaxFrames: 60,
+  imageEmbeddings: false
 };
+
+export function extractionOptions(config: AppConfig): ExtractionOptions {
+  return {
+    pdfParser: config.pdfParser,
+    pdfOcrMaxPages: config.pdfOcrMaxPages,
+    videoFrameOcr: config.videoFrameOcr,
+    videoFrameOcrIntervalSeconds: config.videoFrameOcrIntervalSeconds,
+    videoFrameOcrMaxFrames: config.videoFrameOcrMaxFrames,
+    imageEmbeddings: config.imageEmbeddings
+  };
+}
 
 export async function extractDocument(
   path: string,
@@ -386,46 +400,46 @@ async function extractMediaEvidence(
     }
   }
 
-  if (kind === "video" && options.videoFrameOcr && ocrProvider) {
+  if (kind === "image" && options.imageEmbeddings) {
     try {
-      const frames = await sampleVideoFramesForOcr(
+      evidence.push(visualEvidence(path, kind, "image_visual", await embeddableImage(path), {}));
+    } catch (error) {
+      pending.push(createImageEmbeddingPending(path, kind, error));
+    }
+  }
+
+  const frameOcr = kind === "video" && options.videoFrameOcr ? ocrProvider : null;
+  if (kind === "video" && (frameOcr || options.imageEmbeddings)) {
+    try {
+      const frames = await sampleVideoFrames(
         path,
         options.videoFrameOcrIntervalSeconds,
         options.videoFrameOcrMaxFrames
       );
 
+      let ocrFailed = false;
       for (const frame of frames) {
+        if (options.imageEmbeddings) {
+          const locator = { timestampMs: frame.timestampMs, framePath: frame.framePath };
+          evidence.push(visualEvidence(path, kind, "video_frame_visual", frame.framePath, locator));
+        }
+        if (!frameOcr || ocrFailed) continue;
         try {
-          const ocr = await ocrProvider.extractText({ imagePath: frame.framePath, mode: "text" });
+          const ocr = await frameOcr.extractText({ imagePath: frame.framePath, mode: "text" });
           evidence.push(videoFrameOcrEvidence(path, frame.framePath, frame.timestampMs, ocr.text, ocr.provider, ocr.model));
         } catch (error) {
           pending.push(createVideoFrameOcrPending(path, error));
-          break;
+          ocrFailed = true;
         }
       }
     } catch (error) {
-      pending.push(createVideoFrameOcrPending(path, error));
+      pending.push(frameOcr ? createVideoFrameOcrPending(path, error) : createImageEmbeddingPending(path, kind, error));
     }
   }
 
-  if (evidence.length > 0) {
-    return {
-      path,
-      kind,
-      evidence,
-      pending,
-      skipped: false
-    };
-  }
-
-  if (!sidecar) {
-    return { path, kind, evidence: [], pending, skipped: false };
-  }
-
-  return {
-    path,
-    kind,
-    evidence: [{
+  // A sidecar stands in for text evidence only; visual evidence does not replace it.
+  if (sidecar && evidence.every((item) => item.imagePath)) {
+    evidence.push({
       sourcePath: path,
       sourceKind: kind,
       modality: sidecarModality(kind),
@@ -436,10 +450,46 @@ async function extractMediaEvidence(
         extractor: "sidecar",
         localModelExtractor: kind === "image" ? "glm-ocr-fallback" : "transcription-fallback"
       }
-    }],
-    pending,
-    skipped: false
+    });
+  }
+
+  return { path, kind, evidence, pending, skipped: false };
+}
+
+function visualEvidence(
+  path: string,
+  kind: "image" | "video",
+  modality: "image_visual" | "video_frame_visual",
+  imagePath: string,
+  locator: ExtractedEvidence["locator"]
+): ExtractedEvidence {
+  return {
+    sourcePath: path,
+    sourceKind: kind,
+    modality,
+    text: "",
+    locator,
+    metadata: { extension: extensionOf(path) },
+    imagePath
   };
+}
+
+// Embedding servers reliably read PNG and JPEG; any other image is converted to PNG with ffmpeg.
+async function embeddableImage(path: string): Promise<string> {
+  const extension = extensionOf(path);
+  if (extension === ".png" || extension === ".jpg" || extension === ".jpeg") return path;
+
+  const directory = ".turbosearch/image-embeddings";
+  await mkdir(directory, { recursive: true });
+  const outputPath = join(
+    directory,
+    `${basename(path).replace(/[^a-zA-Z0-9._-]/g, "_")}-${sha256Text(path).slice(0, 12)}.png`
+  );
+  const result = await runCommand("ffmpeg", ["-y", "-i", path, "-frames:v", "1", outputPath]);
+  if (result.exitCode !== 0) {
+    throw new Error(`Failed to convert image to PNG with ffmpeg: ${result.stderr || result.stdout}`);
+  }
+  return outputPath;
 }
 
 function transcriptEvidence(
@@ -510,6 +560,16 @@ function createTranscriptionPending(path: string, kind: "audio" | "video", error
     pending: true,
     reason: `Video/audio transcription with Cohere Transcribe is pending.${detail}`,
     requiredExtractor: "cohere-api"
+  };
+}
+
+function createImageEmbeddingPending(path: string, kind: "image" | "video", error: unknown): ExtractionPending {
+  return {
+    sourcePath: path,
+    sourceKind: kind,
+    pending: true,
+    reason: `Image embedding is pending. ${errorMessage(error)}`,
+    requiredExtractor: "ffmpeg"
   };
 }
 
@@ -658,7 +718,7 @@ async function extractAudioForTranscription(path: string): Promise<string> {
   return outputPath;
 }
 
-async function sampleVideoFramesForOcr(
+async function sampleVideoFrames(
   path: string,
   intervalSeconds: number,
   maxFrames: number

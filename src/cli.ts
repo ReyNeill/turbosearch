@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
-import { createConfig, loadEnvLocal, type AppConfig } from "./config.ts";
+import { createConfig, loadEnvLocal, parseEmbeddingPromptFormat, type AppConfig } from "./config.ts";
 import { createEmbeddingProvider } from "./embeddings/provider.ts";
 import { evaluateRetrieval, loadRetrievalEvalDataset } from "./eval/retrieval.ts";
-import { extractEvidence } from "./ingest/extractors.ts";
+import { extractEvidence, extractionOptions } from "./ingest/extractors.ts";
 import { createOcrProvider } from "./ocr/provider.ts";
 import { SearchEngine } from "./search/search-engine.ts";
 import { distinctDocumentResults } from "./search/result-utils.ts";
@@ -142,13 +142,7 @@ async function runExtract(args: ParsedArgs, payload: JsonPayload, config: AppCon
   const transcriptionProvider = createTranscriptionProvider(config);
   const results = [];
   for (const path of paths) {
-    results.push(await extractEvidence(path, ocrProvider, transcriptionProvider, {
-      pdfParser: config.pdfParser,
-      pdfOcrMaxPages: config.pdfOcrMaxPages,
-      videoFrameOcr: config.videoFrameOcr,
-      videoFrameOcrIntervalSeconds: config.videoFrameOcrIntervalSeconds,
-      videoFrameOcrMaxFrames: config.videoFrameOcrMaxFrames
-    }));
+    results.push(await extractEvidence(path, ocrProvider, transcriptionProvider, extractionOptions(config)));
   }
 
   writeJson({ ok: true, command: "extract", results });
@@ -166,6 +160,7 @@ function configFromArgs(args: ParsedArgs, payload: JsonPayload): AppConfig {
     compatibleEmbeddingBaseUrl: getString(payload, "embeddingBaseUrl") ?? String(args.flags["embedding-base-url"] ?? process.env.TURBOSEARCH_EMBEDDING_BASE_URL ?? "http://127.0.0.1:8000/v1"),
     compatibleEmbeddingApiKey: getString(payload, "embeddingApiKey") ?? process.env.TURBOSEARCH_EMBEDDING_API_KEY ?? "",
     compatibleEmbeddingModel: getString(payload, "embeddingModel") ?? String(args.flags["embedding-model"] ?? process.env.TURBOSEARCH_EMBEDDING_MODEL ?? "unsloth/Qwen3-Embedding-4B"),
+    compatibleEmbeddingPromptFormat: parseEmbeddingPromptFormat(getValue(args.flags["embedding-prompts"], payload.embeddingPrompts) ?? process.env.TURBOSEARCH_EMBEDDING_PROMPTS),
     compatibleEmbeddingQueryInstruction: getString(payload, "embeddingQueryInstruction") ?? String(args.flags["embedding-query-instruction"] ?? process.env.TURBOSEARCH_EMBEDDING_QUERY_INSTRUCTION ?? "Given a question about Silixon's organizational knowledge, retrieve the most relevant passages that answer it"),
     compatibleEmbeddingAuth: parseEmbeddingAuth(getValue(args.flags["embedding-auth"], payload.embeddingAuth) ?? process.env.TURBOSEARCH_EMBEDDING_AUTH),
     awsRegion: getString(payload, "awsRegion") ?? String(args.flags["aws-region"] ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "eu-west-2"),
@@ -193,6 +188,7 @@ function configFromArgs(args: ParsedArgs, payload: JsonPayload): AppConfig {
     videoFrameOcr: parseBoolean(getValue(args.flags["video-frame-ocr"], payload.videoFrameOcr) ?? process.env.TURBOSEARCH_VIDEO_FRAME_OCR, true),
     videoFrameOcrIntervalSeconds: getNumber(payload, "videoFrameOcrIntervalSeconds") ?? Number(args.flags["video-frame-ocr-interval"] ?? process.env.TURBOSEARCH_VIDEO_FRAME_OCR_INTERVAL_SECONDS ?? 30),
     videoFrameOcrMaxFrames: getNumber(payload, "videoFrameOcrMaxFrames") ?? Number(args.flags["video-frame-ocr-max-frames"] ?? process.env.TURBOSEARCH_VIDEO_FRAME_OCR_MAX_FRAMES ?? 60),
+    imageEmbeddings: parseBoolean(getValue(args.flags["image-embeddings"], payload.imageEmbeddings) ?? process.env.TURBOSEARCH_IMAGE_EMBEDDINGS, false),
     turboBits: getNumber(payload, "turboBits") ?? Number(args.flags["turbo-bits"] ?? process.env.TURBOSEARCH_TURBO_BITS ?? 4),
     turboRerankLimit: getNumber(payload, "turboRerank") ?? Number(args.flags["turbo-rerank"] ?? process.env.TURBOSEARCH_TURBO_RERANK_LIMIT ?? 80)
   });
@@ -330,6 +326,10 @@ Options:
                    Model name, default unsloth/Qwen3-Embedding-4B
   --embedding-dimensions
                    Matryoshka output size, default 1024
+  --embedding-prompts
+                   qwen3 (default), embeddinggemma, or none: the query/document prompts the model expects
+  --image-embeddings
+                   false by default; embed images and sampled video frames directly (multimodal server)
   --embedding-auth none, bearer, or sagemaker; sagemaker uses short-lived IAM tokens
   --storage        sqlite by default; postgres requires TURBOSEARCH_POSTGRES_URL
   --postgres-url   Postgres connection URL for --storage postgres
@@ -359,9 +359,9 @@ Options:
   --video-frame-ocr
                    true by default; set false to skip visual OCR on videos
   --video-frame-ocr-interval
-                   Seconds between sampled video frames, default 30
+                   Seconds between sampled video frames (OCR and image embeddings), default 30
   --video-frame-ocr-max-frames
-                   Max video frames to OCR per file, default 60
+                   Max video frames sampled per file, default 60
   --ollama-base-url
                    Ollama base URL, default http://127.0.0.1:11434
   --vllm-glm-ocr-base-url

@@ -30,6 +30,12 @@ export interface SearchStorage {
   getAllChunks(): StoredChunk[] | Promise<StoredChunk[]>;
   searchLexical(query: string, k: number): LexicalSearchResult[] | Promise<LexicalSearchResult[]>;
   searchVector?(queryVector: Float32Array, k: number): VectorSearchResult[] | Promise<VectorSearchResult[]>;
+  // The turbo backend inside the store: candidates from 1-bit codes, then exact cosine on originals.
+  searchCompressed?(
+    queryVector: Float32Array,
+    k: number,
+    candidateLimit: number
+  ): VectorSearchResult[] | Promise<VectorSearchResult[]>;
   searchHybrid?(
     query: string,
     queryVector: Float32Array,

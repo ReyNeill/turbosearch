@@ -163,6 +163,7 @@ function chunkOrgBrainEntry(entry: OrgBrainEntry, content: string, options: Chun
         endOffset,
         metadata: {
           corpus: ORG_BRAIN_CORPUS,
+          embeddingTitle: entry.description,
           embeddingText: embeddingText(entry, heading, chunk.text),
           orgBrain: {
             ...entryMetadata(entry),
@@ -229,9 +230,9 @@ function entryMetadata(entry: OrgBrainEntry): Record<string, unknown> {
   };
 }
 
+// The entry title travels separately as embeddingTitle, so each model's document prompt can place it.
 function embeddingText(entry: OrgBrainEntry, heading: string, text: string): string {
   return [
-    `Title: ${entry.description}`,
     `Project: ${entry.project}`,
     `Type: ${entry.type}`,
     entry.tags.length > 0 ? `Tags: ${entry.tags.join(", ")}` : "",
